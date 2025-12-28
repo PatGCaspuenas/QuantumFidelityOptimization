@@ -260,7 +260,7 @@ function bayesopt_ucb_threshold(f; bounds::Vector{Tuple{Float64,Float64}},
 
     # BO loop
     for _ in 1:n_iter
-        gp = fit_gp(X, y, σy; ℓ=ℓ, σf=σf)
+        gp = fit_gp(X, y, σy; learn_hypers=true, n_try=40)
 
         # 1) choose x by GP-UCB
         best_x = nothing
