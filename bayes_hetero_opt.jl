@@ -50,10 +50,8 @@ end
 
 function fit_gp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float64};
                 ℓ::Union{Nothing,Vector{Float64}}=nothing,
-                σf::Union{Nothing,Float64}=nothing,
-                jitter::Float64=1e-10,
-                learn_hypers::Bool=true,
-                n_try::Int=40)
+                σf::Float64=1.0,
+                jitter::Float64=1e-10)
 
     @assert size(X,2) == length(y) == length(σy)
 
@@ -63,55 +61,17 @@ function fit_gp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float64};
     σstd = σy ./ yσ
 
     d, n = size(X)
+    ℓ = ℓ === nothing ? fill(0.3, d) : ℓ
 
-    # --- candidate sampler (log-space) ---
-    function sample_hypers()
-        ℓc = Vector{Float64}(undef, d)
-        @inbounds for j in 1:d
-            ℓc[j] = exp(log(0.05) + rand()*(log(2.0)-log(0.05)))  # ~[0.05, 2]
-        end
-        σfc = exp(log(0.2) + rand()*(log(3.0)-log(0.2)))         # ~[0.2, 3]
-        return ℓc, σfc
-    end
-
-    # --- LML for heteroscedastic GP (with Cholesky) ---
-    function lml(ℓc, σfc)
-        K = buildK(X, ℓc, σfc)
-        @inbounds for i in 1:n
-            K[i,i] += σstd[i]^2 + jitter
-        end
-        F = cholesky(Symmetric(K))
-        α = F \ ystd
-        # -0.5*y'K^{-1}y - sum(log(diag(L))) - n/2 log(2π)
-        return -0.5*dot(ystd, α) - sum(log, diag(F.L)) - 0.5*n*log(2π)
-    end
-
-    # choose hypers
-    ℓ_best = ℓ === nothing ? fill(0.3, d) : copy(ℓ)
-    σf_best = σf === nothing ? 1.0 : σf
-    best = learn_hypers ? -Inf : lml(ℓ_best, σf_best)
-
-    if learn_hypers
-        for _ in 1:n_try
-            ℓc, σfc = sample_hypers()
-            val = lml(ℓc, σfc)
-            if val > best
-                best = val
-                ℓ_best = ℓc
-                σf_best = σfc
-            end
-        end
-    end
-
-    # final fit with best hypers
-    K = buildK(X, ℓ_best, σf_best)
+    K = buildK(X, ℓ, σf)
     @inbounds for i in 1:n
         K[i,i] += σstd[i]^2 + jitter
     end
+
     L = cholesky(Symmetric(K)).L
     α = L' \ (L \ ystd)
 
-    return HeteroGP(X, yμ, yσ, ℓ_best, σf_best, L, α)
+    return HeteroGP(X, yμ, yσ, ℓ, σf, L, α)
 end
 
 function predict_latent(gp::HeteroGP, x::Vector{Float64})
@@ -260,7 +220,7 @@ function bayesopt_ucb_threshold(f; bounds::Vector{Tuple{Float64,Float64}},
 
     # BO loop
     for _ in 1:n_iter
-        gp = fit_gp(X, y, σy; learn_hypers=true, n_try=40)
+        gp = fit_gp(X, y, σy; ℓ=ℓ, σf=σf)
 
         # 1) choose x by GP-UCB
         best_x = nothing
