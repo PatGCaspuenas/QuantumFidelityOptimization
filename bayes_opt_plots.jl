@@ -139,6 +139,7 @@ function animate2d(res::Main.BayesHeteroOpt.HeteroBOResult;
                    nx::Int=40, ny::Int=40, fps::Int=10,
                    show_noise::Bool=true)
     anim = @animate for t in 1:(size(res.X,2) - res.n_init)
+        println(t)
         plot2d(res; t=t, nx=nx, ny=ny, f_true=f_true, show_noise=show_noise)
     end
     return anim, fps
