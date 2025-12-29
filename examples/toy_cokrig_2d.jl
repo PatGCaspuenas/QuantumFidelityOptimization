@@ -1,8 +1,13 @@
 using Random
 using Distributions
 using Plots
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+Pkg.instantiate()
 
-using CalibrationCode
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+using .CalibrationCode
+
 include(joinpath(@__DIR__, "..", "scripts", "plots_cokrig.jl"))  # plot2d_cokrig / animate2d_cokrig
 
 function main(; seed=2)
