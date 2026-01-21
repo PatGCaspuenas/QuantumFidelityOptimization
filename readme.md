@@ -147,21 +147,4 @@ The calibration model provides two estimators:
 
 In the heteroscedastic BO scripts, the BO “noise level” `σ` is used as an algorithmic knob and is mapped to a shot count `N` (see `N_from_sigma(σ)` inside the scripts). This is where the cost/accuracy trade-off is controlled.
 
----
-
-## Reproducibility
-
-- All examples and scripts use explicit random seeds.
-- `Project.toml` and `Manifest.toml` are committed to support reproducible environments.
-
----
-
-## Citation
-
-If you use this repository in academic work, cite it as software and include the commit hash.
-
----
-
-## License
-
 Add a license file if you intend to distribute publicly (e.g., MIT/BSD/Apache-2.0).
