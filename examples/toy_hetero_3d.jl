@@ -1,6 +1,7 @@
 using Random
 using Distributions
-using CalibrationCode
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+using .CalibrationCode
 
 function main(; seed=3)
     rng = MersenneTwister(seed)
@@ -19,8 +20,8 @@ function main(; seed=3)
         σ_levels=σ_levels,
         n_init=10,
         n_iter=80,
-        κ=2.0,
-        α=0.5,
+        κ=1.75,
+        α=18.0,
         seed=seed
     )
 

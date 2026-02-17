@@ -2,7 +2,9 @@ using Random
 using Distributions
 using Plots
 
-using CalibrationCode
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+using .CalibrationCode
+
 include(joinpath(@__DIR__, "..", "scripts", "plots_mf.jl"))   # plot2d_mf / animate2d_mf (optional)
 
 function main(; seed=1)
@@ -58,8 +60,8 @@ function main(; seed=1)
 
     # --- Plot 1: posterior at highest fidelity (ℓ=3) + samples colored by z
     p1 = plot2d_mf(res; ℓ=3, f_true=f_hi, nx=50, ny=50, obs_noise=1e-3)
-    savefig(p1, "toy_mf_2d_posterior_hi.png")
-    println("Saved -> toy_mf_2d_posterior_hi.png")
+    savefig(p1, "figures/toy_mf_2d_posterior_hi.png")
+    println("Saved -> figures/toy_mf_2d_posterior_hi.png")
 
     # --- Plot 2: sample locations by fidelity + recommended point
     Xa = res.Xa
@@ -75,8 +77,8 @@ function main(; seed=1)
         end
     end
     scatter!(p2, [res.x_rec[1]], [res.x_rec[2]]; ms=7, label="recommended")
-    savefig(p2, "toy_mf_2d_samples.png")
-    println("Saved -> toy_mf_2d_samples.png")
+    savefig(p2, "figures/toy_mf_2d_samples.png")
+    println("Saved -> figures/toy_mf_2d_samples.png")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

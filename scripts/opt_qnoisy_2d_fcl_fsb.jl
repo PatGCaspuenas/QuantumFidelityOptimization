@@ -1,6 +1,12 @@
 using Random
 using Plots
-using CalibrationCode
+
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+Pkg.instantiate()
+
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+using .CalibrationCode
 include(joinpath(@__DIR__, "..", "scripts", "plots_hetero.jl"))
 
 redirect_stderr(devnull)

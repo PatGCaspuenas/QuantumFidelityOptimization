@@ -2,6 +2,7 @@ using Random
 using Distributions
 using Plots
 import Pkg
+
 Pkg.activate(joinpath(@__DIR__, ".."))
 Pkg.instantiate()
 
@@ -25,10 +26,15 @@ function main(; seed=2)
 
     # N-fidelity callable: f(x, level)
     function f_level(x, level::Int)
-        level == 1 && return f_lo(x)  + rand(rng, Normal(0, σ[1]))
-        level == 2 && return f_mid(x) + rand(rng, Normal(0, σ[2]))
-        level == 3 && return f_hi(x)  + rand(rng, Normal(0, σ[3]))
-        throw(ArgumentError("invalid level=$level"))
+        if level == 1 
+            return f_lo(x)  + rand(rng, Normal(0, σ[1]))
+        elseif level == 2
+            return f_mid(x) + rand(rng, Normal(0, σ[2]))
+        elseif level == 3
+            return f_hi(x)  + rand(rng, Normal(0, σ[3]))
+        else
+            throw(ArgumentError("invalid level=$level"))
+        end
     end
 
     bounds = [(-1.0, 1.0), (-1.0, 1.0)]
@@ -52,7 +58,7 @@ function main(; seed=2)
 
     # Posterior contours at highest fidelity + show all samples
     p = plot2d_cokrig(res; level=3, nx=50, ny=50, show_std=false, show_points=true)
-    savefig(p, "toy_cokrig_2d_posterior_hi.png")
+    savefig(p, "figures/toy_cokrig_2d_posterior_hi.png")
     println("Saved -> toy_cokrig_2d_posterior_hi.png")
 
     # Sample scatter by fidelity
@@ -63,7 +69,7 @@ function main(; seed=2)
         scatter!(p2, Xm[1,:], Xm[2,:]; ms=4, label="level $m")
     end
     scatter!(p2, [res.x_rec[1]], [res.x_rec[2]]; ms=7, label="recommended")
-    savefig(p2, "toy_cokrig_samples.png")
+    savefig(p2, "figures/toy_cokrig_samples.png")
     println("Saved -> toy_cokrig_samples.png")
 end
 

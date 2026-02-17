@@ -1,8 +1,14 @@
 using Random
 using Distributions
 using Plots
+import Pkg
 
-using CalibrationCode
+Pkg.activate(joinpath(@__DIR__, ".."))
+Pkg.instantiate()
+
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+using .CalibrationCode
+
 include(joinpath(@__DIR__, "..", "scripts", "plots_hetero.jl"))  # plot2d_hetero / animate2d_hetero
 
 function main(; seed=2)
@@ -34,12 +40,12 @@ function main(; seed=2)
     end
 
     p = plot2d_hetero(res; f_true=f_true, nx=50, ny=50, fps=6, show_noise=true)
-    savefig(p, "toy_hetero_2d.png")
-    println("Saved -> toy_hetero_2d.png")
+    savefig(p, "figures/toy_hetero_2d.png")
+    println("Saved -> figures/toy_hetero_2d.png")
 
     anim, fps = animate2d_hetero(res; f_true=f_true, nx=50, ny=50, fps=6, show_noise=true)
-    gif(anim, "toy_hetero_2d.gif", fps=fps)
-    println("Saved -> toy_hetero_2d.gif")
+    gif(anim, "figures/toy_hetero_2d.gif", fps=fps)
+    println("Saved -> figures/toy_hetero_2d.gif")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

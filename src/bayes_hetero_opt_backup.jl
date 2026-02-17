@@ -218,7 +218,7 @@ end
 # BO structures + utilities
 # -------------------------
 
-mutable struct HeteroBOResult
+struct HeteroBOResult
     X::Matrix{Float64}                    # d×n
     y::Vector{Float64}                    # sign-adjusted if maximize=false
     σy::Vector{Float64}                   # noise std per observation
@@ -229,13 +229,6 @@ mutable struct HeteroBOResult
     maximize::Bool
     x_rec::Vector{Float64}
     y_rec::Float64
-    n_iter_actual::Int                    # actual iterations if early stopped
-    y_last::Float64                       # latest observed value in original objective scale
-end
-
-# Constructor with default value for n_iter_actual
-function HeteroBOResult(X, y, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec)
-    return HeteroBOResult(X, y, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec, 0, NaN)
 end
 
 @inline function _validate_bounds(bounds)
@@ -318,8 +311,6 @@ Objective is `f(x, σ)`.
 
 Set `maximize=false` to minimize.
 Use `seed` for determinism without affecting the global RNG.
-Set `fidelity_threshold` to stop early when the latest measurement reaches this threshold
-(compared in the original objective scale and respecting `maximize`).
 """
 function bayesopt_ucb_threshold(f;
                                bounds::Vector{Tuple{Float64,Float64}},
@@ -334,8 +325,7 @@ function bayesopt_ucb_threshold(f;
                                hyper_every::Int=10,
                                rng::Random.AbstractRNG=Random.default_rng(),
                                seed=nothing,
-                               verbose::Bool=false,
-                               fidelity_threshold=nothing)
+                               verbose::Bool=false)
 
     _validate_bounds(bounds)
     isempty(σ_levels) && throw(ArgumentError("σ_levels must be non-empty"))
@@ -407,32 +397,6 @@ function bayesopt_ucb_threshold(f;
         if verbose
             @info "it=$it best_acq=$best_a σ=$σ_next"
         end
-        
-        # Check fidelity threshold for early stopping (latest measurement only)
-        if fidelity_threshold !== nothing
-            y_latest_raw = maximize ? y[idx] : -y[idx]
-            reached = maximize ? (y_latest_raw >= fidelity_threshold) : (y_latest_raw <= fidelity_threshold)
-            if reached
-                # Trim arrays to actual size and record iterations
-                X = X[:, 1:idx]
-                y = y[1:idx]
-                σy = σy[1:idx]
-                n_iter_actual = it
-                if verbose
-                    @info "Fidelity threshold $fidelity_threshold reached at iteration $it"
-                end
-                
-                gp = fit_heterogp(X, y, σy; θ_init=θ_prev, learn_hypers=true, learn_noise_scale=true,
-                                  n_restarts=8, jitter=1e-8, rng=rng_local)
-                x_rec, m_rec = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
-                y_out = maximize ? y : (-y)
-                y_rec = maximize ? m_rec : -m_rec
-                result = HeteroBOResult(X, y_out, σy, bounds, σ_levels, n_init, n_iter_actual, maximize, x_rec, y_rec)
-                result.n_iter_actual = n_iter_actual
-                result.y_last = y_latest_raw
-                return result
-            end
-        end
     end
 
     gp = fit_heterogp(X, y, σy; θ_init=θ_prev, learn_hypers=true, learn_noise_scale=true,
@@ -443,9 +407,5 @@ function bayesopt_ucb_threshold(f;
     y_out = maximize ? y : (-y)
     y_rec = maximize ? m_rec : -m_rec
 
-    y_last_raw = maximize ? y[end] : -y[end]
-    result = HeteroBOResult(X, y_out, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec)
-    result.n_iter_actual = n_iter
-    result.y_last = y_last_raw
-    return result
+    return HeteroBOResult(X, y_out, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec)
 end

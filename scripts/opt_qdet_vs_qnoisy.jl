@@ -13,7 +13,12 @@
 
 using Random
 using Plots
-using CalibrationCode
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+Pkg.instantiate()
+
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+using .CalibrationCode
 
 redirect_stderr(devnull)
 

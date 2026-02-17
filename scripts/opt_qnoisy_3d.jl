@@ -1,5 +1,10 @@
 using Random
-using CalibrationCode
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+Pkg.instantiate()
+
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+using .CalibrationCode
 
 redirect_stderr(devnull)
 
@@ -11,9 +16,9 @@ base = CalibrationCode.ideal(t)
 const f_cl0, f_sb0, A0 = base.f_cl, base.f_sb, base.A
 
 # spans around baseline
-const span_fcl = 5e4
-const span_fsb = 5e4
-const span_A   = 8e4
+const span_fcl = 3e4
+const span_fsb = 3e4
+const span_A   = 6e4
 
 # u ∈ [-1,1]^3 -> physical params
 u_to_params(u) = (f_cl0 + span_fcl*u[1],
@@ -24,12 +29,13 @@ u_to_params(u) = (f_cl0 + span_fcl*u[1],
 function N_from_sigma(σ::Float64)
     # keep bounded for runtime sanity
     N = round(Int, 1 / (σ^2))
-    return clamp(N, 20, 3000)
+    return clamp(N, 20, 10000)
 end
 
 function Q_fun(u, σ)
     fcl, fsb, A = u_to_params(u)
-    return CalibrationCode.Q_noisy(t, fcl, fsb, A; N=N_from_sigma(σ))
+    return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N_from_sigma(σ))
+    # return CalibrationCode.Q_noisy(t, fcl, fsb, A; N=N_from_sigma(σ))
 end
 
 function Q_true(u)
@@ -37,7 +43,7 @@ function Q_true(u)
     return CalibrationCode.Q_det(t, fcl, fsb, A)
 end
 
-σ_levels = [0.1, 0.05, 0.02, 0.01, 0.005, 0.001, 0.0005]
+σ_levels = [0.1, 0.05, 0.02, 0.01]
 bounds   = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
 
 resH = CalibrationCode.bayesopt_ucb_threshold(Q_fun;

@@ -5,6 +5,7 @@ module CalibrationCode
 using Random
 using Statistics
 using LinearAlgebra
+using IonSim, QuantumOptics, StatsBase, LsqFit
 
 # --- Physics / estimators (IonSim + QuantumOptics live in calibration.jl) ---
 include("calibration.jl")

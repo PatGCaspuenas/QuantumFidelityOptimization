@@ -1,4 +1,5 @@
 # src/calibration.jl
+const pc = IonSim.PhysicalConstants
 
 """
     bell_fidelity_phi_plus(ρ) -> Real
@@ -42,8 +43,8 @@ Create a standard 2-ion Ca40 chamber with two lasers and a single selected z-mod
 Returns a named tuple with (ca, laser1, laser2, chamber, mode).
 """
 function build_chamber(; B=6e-4,
-                         comfreq=(x=3e6, y=3e6, z=2.5e5),
-                         selected=(; z=[1]))
+                         comfreq=(x=3e6, y=3e6, z=1e6),
+                         selected=(; x=[1]))
     ca = Ca40([("S1/2", -1/2, "S"), ("D5/2", -1/2, "D")])
     laser1 = Laser(pointing=[(1, 1.), (2, 1.)])
     laser2 = Laser(pointing=[(1, 1.), (2, 1.)])
@@ -61,7 +62,7 @@ function build_chamber(; B=6e-4,
         lasers=[laser1, laser2],
     )
 
-    mode = zmodes(chamber)[1]
+    mode = xmodes(chamber)[1]
     return (ca=ca, laser1=laser1, laser2=laser2, chamber=chamber, mode=mode)
 end
 
@@ -73,8 +74,8 @@ and intensity `A`. Mutates lasers in `setup`.
 """
 function configure_lasers!(setup, f_cl, f_sb, A)
     laser1, laser2, chamber = setup.laser1, setup.laser2, setup.chamber
-    wavelength!(laser1, pc.c / f_cl); detuning!(laser1,  f_sb); polarization!(laser1, x̂); wavevector!(laser1, ẑ)
-    wavelength!(laser2, pc.c / f_cl); detuning!(laser2, -f_sb); polarization!(laser2, x̂); wavevector!(laser2, ẑ)
+    wavelength!(laser1, pc.c / f_cl); detuning!(laser1,  f_sb); polarization!(laser1, ẑ); wavevector!(laser1, x̂)
+    wavelength!(laser2, pc.c / f_cl); detuning!(laser2, -f_sb); polarization!(laser2, ẑ); wavevector!(laser2, x̂)
     intensity!(laser1, A); intensity!(laser2, A)
     return nothing
 end
@@ -113,10 +114,10 @@ function ideal(t; dt=0.01)
 
     # Transition setup on both lasers
     wavelength_from_transition!(setup.laser1, setup.ca, ("S","D"), setup.chamber)
-    detuning!(setup.laser1,  ν + ϵ); polarization!(setup.laser1, x̂); wavevector!(setup.laser1, ẑ); phase!(setup.laser1, 0)
+    detuning!(setup.laser1,  ν + ϵ); polarization!(setup.laser1, ẑ); wavevector!(setup.laser1, x̂); phase!(setup.laser1, 0)
 
     wavelength_from_transition!(setup.laser2, setup.ca, ("S","D"), setup.chamber)
-    detuning!(setup.laser2, -ν - ϵ); polarization!(setup.laser2, x̂); wavevector!(setup.laser2, ẑ); phase!(setup.laser2, 0)
+    detuning!(setup.laser2, -ν - ϵ); polarization!(setup.laser2, ẑ); wavevector!(setup.laser2, x̂); phase!(setup.laser2, 0)
 
     c = pc.c
     f_b  = c / setup.laser1.λ + setup.laser1.Δ
@@ -158,15 +159,15 @@ and throws an informative error if unavailable.
 """
 function Q_noisy(t, f_cl, f_sb, A; N::Int=100, phase_grid=0:0.1:π, dt=0.1)
     # Call-time optional deps (cleaner than file-scope try/catch)
-    local StatsBase, LsqFit
-    try
-        @eval begin
-            import StatsBase
-            import LsqFit
-        end
-    catch
-        throw(ArgumentError("Q_noisy requires StatsBase and LsqFit. Add them to the environment to use this method."))
-    end
+    # local StatsBase, LsqFit
+    # try
+    #     @eval begin
+    #         import StatsBase
+    #         import LsqFit
+    #     end
+    # catch
+    #     throw(ArgumentError("Q_noisy requires StatsBase and LsqFit. Add them to the environment to use this method."))
+    # end
 
     setup = build_chamber()
     configure_lasers!(setup, f_cl, f_sb, A)
@@ -217,4 +218,42 @@ function Q_noisy(t, f_cl, f_sb, A; N::Int=100, phase_grid=0:0.1:π, dt=0.1)
     C = abs(fit.param[1])
 
     return (1 - P_odd + C) / 2
+end
+
+function Q_varMS(t, f_cl, Δ, I; N = 1000, numMS = 6)
+
+    setup = build_chamber()
+    configure_lasers!(setup, f_cl, Δ, I)
+
+    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
+    
+    # setup the Hamiltonian
+    h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf);
+    # solve system
+    tout = 0:0.1:t
+    tout, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
+
+    for n in 2:numMS
+        tout = 0:0.1:t
+        tout, sol = timeevolution.schroedinger_dynamic(tout, sol[end], h)
+    end
+
+    SS = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
+    DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
+    SD = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
+    DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
+    
+    correlator_values = Dict(1 => -1, 2 => 1, 3 => -1, 4 => -1)
+    weights = [SS, DD, SD, DS]
+    samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
+    values = [correlator_values[c] for c in samples]
+    parity = 0
+    
+    for value in values
+        if value == 1
+            parity += 1
+        end
+    end
+
+    return (parity/N)^(1/numMS)
 end

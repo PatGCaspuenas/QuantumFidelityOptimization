@@ -2,7 +2,13 @@
 # Plots for heteroscedastic HeteroBOResult
 
 using Plots
-using CalibrationCode
+
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."))
+Pkg.instantiate()
+
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+using .CalibrationCode
 
 function _grid(bounds, nx, ny)
     lb = [b[1] for b in bounds]
@@ -14,7 +20,7 @@ end
 
 function plot2d_hetero(res::CalibrationCode.HeteroBOResult;
                        t::Int=size(res.X,2)-res.n_init,
-                       nx::Int=40, ny::Int=40,
+                       nx::Int=40, ny::Int=40, fps::Int=10,
                        f_true::Union{Nothing,Function}=nothing,
                        show_noise::Bool=true,
                        learn_hypers::Bool=true)
