@@ -1,7 +1,7 @@
 using Statistics
 using Plots
 
-results_file = joinpath(@__DIR__, "benchmark_results.txt")
+results_file = joinpath(@__DIR__, "benchmark_results_qpt.txt")
 output_file = joinpath(@__DIR__, "benchmark_histogram.png")
 
 if !isfile(results_file)
@@ -24,7 +24,7 @@ for line in data_lines
 	if length(parts) < 3
 		continue
 	end
-	push!(Q_det_values, parse(Float64, parts[3]))
+	push!(Q_det_values, parse(Float64, parts[4]))
 end
 
 if isempty(Q_det_values)
@@ -40,7 +40,7 @@ histogram(
 	bins=:auto,
 	xlabel="Q_det",
 	ylabel="Count",
-	title="Benchmark Q_det Histogram",
+	title="Benchmark Q_det Histogram qpt",
 	legend=false
 )
 

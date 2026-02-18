@@ -409,10 +409,11 @@ function bayesopt_ucb_threshold(f;
         end
         
         # Check fidelity threshold for early stopping (latest measurement only)
+        # Exclude y_latest_raw == 1.0 from triggering early stop (likely noisy artifact)
         if fidelity_threshold !== nothing
             y_latest_raw = maximize ? y[idx] : -y[idx]
             reached = maximize ? (y_latest_raw >= fidelity_threshold) : (y_latest_raw <= fidelity_threshold)
-            if reached
+            if reached && y_latest_raw != 1.0
                 # Trim arrays to actual size and record iterations
                 X = X[:, 1:idx]
                 y = y[1:idx]

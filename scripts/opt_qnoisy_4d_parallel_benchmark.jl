@@ -18,12 +18,6 @@ Pkg.instantiate()
 # redirect_stderr(devnull)
 
 # -------------------------
-# Configuration Parameters
-# -------------------------
-const use_log_fidelity = false  # Set to true to optimize log(1-Q) instead of Q
-const optimize_det = true       # Set to true to optimize Q_det, false for Q_noisy
-
-# -------------------------
 # Baseline
 # -------------------------
 const t = 100.0
@@ -34,24 +28,26 @@ const f_cl0, f_sb0, A0 = base.f_cl, base.f_sb, base.A
 const span_fcl = 3e4
 const span_fsb = 3e4
 const span_A   = 6e4
+const phi0     = 0.0      # baseline phase
+const span_phi = π        # search over full phase range [0, 2π]
 
 # Broadcast constants to all workers
 @everywhere const t = $t
 @everywhere const f_cl0 = $f_cl0
 @everywhere const f_sb0 = $f_sb0
 @everywhere const A0 = $A0
+@everywhere const phi0 = $phi0
 @everywhere const span_fcl = $span_fcl
 @everywhere const span_fsb = $span_fsb
 @everywhere const span_A = $span_A
+@everywhere const span_phi = $span_phi
 
-# Broadcast configuration to all workers
-@everywhere const use_log_fidelity = $use_log_fidelity
-@everywhere const optimize_det = $optimize_det
-
-# u ∈ [-1,1]^3 -> physical params
+# u ∈ [-1,1]^5 -> physical params (f_cl, f_sb, A, phi_1, phi_2)
 @everywhere u_to_params(u) = (f_cl0 + span_fcl*u[1],
                                f_sb0 + span_fsb*u[2],
-                               A0    + span_A  *u[3])
+                               A0    + span_A  *u[3],
+                               phi0  + span_phi*u[4],
+                               phi0  + span_phi*u[5])
 
 # noise knob -> shots (tunable)
 @everywhere function N_from_sigma(σ::Float64)
@@ -60,36 +56,18 @@ const span_A   = 6e4
     return clamp(N, 20, 10000)
 end
 
-@everywhere function apply_log_fidelity(Q::Float64)
-    """Convert fidelity to log scale if enabled"""
-    if use_log_fidelity
-        # Use log(1-error) = log(2-Q) for log scale (for Q close to 1)
-        return log(max(2.0 - Q, 1e-10))
-    else
-        return Q
-    end
-end
-
 @everywhere function Q_fun(u, σ)
-    fcl, fsb, A = u_to_params(u)
-    if optimize_det
-        Q = CalibrationCode.Q_det(t, fcl, fsb, A)
-    else
-        Q = CalibrationCode.Q_noisy(t, fcl, fsb, A; N=N_from_sigma(σ))#CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N_from_sigma(σ), numMS = 2)
-    end
-    return apply_log_fidelity(Q)
+    fcl, fsb, A, phi_1, phi_2 = u_to_params(u)
+    return CalibrationCode.Q_noisy(t, fcl, fsb, A; phi_1=phi_1, phi_2=phi_2, N=N_from_sigma(σ))#Q_varMS(t, fcl, fsb, A; N=N_from_sigma(σ), numMS = 2, phi_1=phi_1, phi_2=phi_2)
 end
 
 @everywhere function Q_true(u)
-    fcl, fsb, A = u_to_params(u)
-    Q = CalibrationCode.Q_det(t, fcl, fsb, A)
-    return apply_log_fidelity(Q)
+    fcl, fsb, A, phi_1, phi_2 = u_to_params(u)
+    return CalibrationCode.Q_det(t, fcl, fsb, A; phi_1=phi_1, phi_2=phi_2)
 end
 
-# Note: Q_true always returns deterministic Q_det (no log applied for comparison)
-
-σ_levels = [.03]
-bounds   = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
+σ_levels = [0.1, 0.05, 0.02, 0.01]
+bounds   = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
 
 # -------------------------
 # Multiple Simulations with Fixed Hyperparameters
@@ -97,17 +75,12 @@ bounds   = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
 α = 1.5
 κ = 1.9
 num_sims = 4
-fidelity_threshold = .995  # Set to a value (e.g., 0.95) to stop early when reached (ignored for log scale)
-
-optimization_mode = optimize_det ? "Q_det" : "Q_noisy"
-metric_type = use_log_fidelity ? "log(1-Q)" : "Q"
+fidelity_threshold = 0.997  # Set to a value (e.g., 0.95) to stop early when reached
 
 println("=== Starting Parallel Simulations (Random Seeds) ===")
-println("Optimization mode: $optimization_mode")
-println("Metric: $metric_type")
 println("Fixed α = $α, κ = $κ")
 println("Number of simulations: $num_sims")
-if fidelity_threshold !== nothing && !use_log_fidelity
+if fidelity_threshold !== nothing
     println("Fidelity threshold: $fidelity_threshold")
 end
 
@@ -130,16 +103,14 @@ results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
             fidelity_threshold=fidelity_threshold
         )
         
-        # Always calculate true Q_det in original scale for reporting
-        fcl, fsb, A = u_to_params(res.x_rec)
-        Q_det_val = CalibrationCode.Q_det(t, fcl, fsb, A)
+        Q_det_val = Q_true(res.x_rec)
         n_iters = res.n_iter_actual > 0 ? res.n_iter_actual : 120
         
         # Count noise level usage
         σy_used = res.σy[1:n_iters+12]  # n_init=12 + actual iterations
         noise_counts = Dict(σ => count(==(σ), σy_used) for σ in σ_levels)
         
-        println("Simulation $sim_idx → Q_det = $(Q_det_val), metric = $(res.y_last), iterations: $n_iters")
+        println("Simulation $sim_idx → Q_det = $(Q_det_val), noisy = $(res.y_last), iterations: $n_iters")
         flush(stdout)
         
         (
@@ -192,9 +163,6 @@ end
 total_calls = sum(values(total_noise_counts))
 
 println("\n=== RESULTS SUMMARY ===")
-optimization_mode = optimize_det ? "Q_det" : "Q_noisy"
-metric_type = use_log_fidelity ? "log(2-Q)" : "Q"
-println("Optimization mode: $optimization_mode (Metric: $metric_type)")
 println("Best Q_det = ", best_result.Q_det, " (Simulation ", best_result.sim_idx, ")")
 println("Average Q_det = ", avg_Q_det, " ± ", std_Q_det)
 println("Median Q_det = ", med_Q_det)
@@ -212,12 +180,15 @@ println("Total:  $total_calls calls")
 println("\nBest noisy measurement = ", best_result.Q_noisy)
 println("\nBest u_rec = ", best_result.x_rec)
 
-fcl_rec, fsb_rec, A_rec = u_to_params(best_result.x_rec)
+fcl_rec, fsb_rec, A_rec, phi_1_rec, phi_2_rec = u_to_params(best_result.x_rec)
 println("\n=== BEST RESULT PHYSICAL PARAMETERS ===")
-println("Recommended f_cl = ", fcl_rec)
-println("Recommended f_sb = ", fsb_rec)
-println("Recommended A    = ", A_rec)
-println("Baseline   f_cl = ", f_cl0, "  f_sb = ", f_sb0, "  A = ", A0)
+println("Recommended f_cl   = ", fcl_rec)
+println("Recommended f_sb   = ", fsb_rec)
+println("Recommended A      = ", A_rec)
+println("Recommended phi_1  = ", phi_1_rec)
+println("Recommended phi_2  = ", phi_2_rec)
+println("Phase difference   = ", abs(phi_1_rec - phi_2_rec))
+println("Baseline   f_cl = ", f_cl0, "  f_sb = ", f_sb0, "  A = ", A0, "  phi = ", phi0)
 
 # -------------------------
 # Summary Table
@@ -233,7 +204,7 @@ end
 # -------------------------
 # Write Results to File
 # -------------------------
-output_file = joinpath(@__DIR__, "benchmark_results_qdet.txt")
+output_file = joinpath(@__DIR__, "benchmark_results_withphase.txt")
 open(output_file, "w") do io
     println(io, "=== BENCHMARK RESULTS ===")
     println(io, "Fixed α = $α, κ = $κ")
@@ -260,12 +231,15 @@ open(output_file, "w") do io
     println(io, "Best u_rec = $(best_result.x_rec)")
     println(io, "")
     println(io, "=== BEST RESULT PHYSICAL PARAMETERS ===")
-    println(io, "Recommended f_cl = $fcl_rec")
-    println(io, "Recommended f_sb = $fsb_rec")
-    println(io, "Recommended A    = $A_rec")
-    println(io, "Baseline   f_cl = $f_cl0, f_sb = $f_sb0, A = $A0")
+    println(io, "Recommended f_cl   = $fcl_rec")
+    println(io, "Recommended f_sb   = $fsb_rec")
+    println(io, "Recommended A      = $A_rec")
+    println(io, "Recommended phi_1  = $phi_1_rec")
+    println(io, "Recommended phi_2  = $phi_2_rec")
+    println(io, "Phase difference   = $(abs(phi_1_rec - phi_2_rec))")
+    println(io, "Baseline   f_cl = $f_cl0, f_sb = $f_sb0, A = $A0, phi = $phi0")
     println(io, "")
-    println(io, "=== All Results ===")
+    println(io, "=== INDIVIDUAL RESULTS ===")
     σ_headers = join(["σ=$(σ)" for σ in sort(collect(σ_levels), rev=true)], "\t")
     println(io, "Sim\tSeed\tIterations\tQ_det\t$σ_headers")
     for r in results_grid

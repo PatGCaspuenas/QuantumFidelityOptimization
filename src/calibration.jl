@@ -72,11 +72,12 @@ end
 Configure both lasers at carrier frequency `f_cl`, symmetric sideband detunings ±f_sb,
 and intensity `A`. Mutates lasers in `setup`.
 """
-function configure_lasers!(setup, f_cl, f_sb, A)
+function configure_lasers!(setup, f_cl, f_sb, A; phi_1 = 0.0, phi_2 = 0.0)
     laser1, laser2, chamber = setup.laser1, setup.laser2, setup.chamber
     wavelength!(laser1, pc.c / f_cl); detuning!(laser1,  f_sb); polarization!(laser1, ẑ); wavevector!(laser1, x̂)
     wavelength!(laser2, pc.c / f_cl); detuning!(laser2, -f_sb); polarization!(laser2, ẑ); wavevector!(laser2, x̂)
     intensity!(laser1, A); intensity!(laser2, A)
+    phase!(laser1, phi_1); phase!(laser2, phi_2)
     return nothing
 end
 
@@ -137,27 +138,27 @@ function ideal(t; dt=0.01)
 end
 
 """
-    Q_det(t, f_cl, f_sb, A; dt=0.01) -> Real
+    Q_det(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, dt=0.01) -> Real
 
-Deterministic fidelity estimator: evolve ideally with specified `(f_cl, f_sb, A)`
+Deterministic fidelity estimator: evolve ideally with specified `(f_cl, f_sb, A, phi_1, phi_2)`
 and compute `bell_fidelity_phi_plus` on the reduced state.
 """
-function Q_det(t, f_cl, f_sb, A; dt=0.01)
+function Q_det(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, dt=0.01)
     setup = build_chamber()
-    configure_lasers!(setup, f_cl, f_sb, A)
+    configure_lasers!(setup, f_cl, f_sb, A, phi_1=phi_1, phi_2=phi_2)
     ρ = evolve_reduced_density(setup, t; dt=dt)
     return bell_fidelity_phi_plus(ρ)
 end
 
 """
-    Q_noisy(t, f_cl, f_sb, A; N=100, phase_grid=0:0.1:π, dt=0.1) -> Real
+    Q_noisy(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, N=100, phase_grid=0:0.1:π, dt=0.1) -> Real
 
 Noisy estimator based on sampling + parity scan + cosine fit.
 
 Requires `StatsBase` and `LsqFit`. This method attempts to load them at call-time
 and throws an informative error if unavailable.
 """
-function Q_noisy(t, f_cl, f_sb, A; N::Int=100, phase_grid=0:0.1:π, dt=0.1)
+function Q_noisy(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, N::Int=100, phase_grid=0:0.1:π, dt=0.1)
     # Call-time optional deps (cleaner than file-scope try/catch)
     # local StatsBase, LsqFit
     # try
@@ -170,7 +171,7 @@ function Q_noisy(t, f_cl, f_sb, A; N::Int=100, phase_grid=0:0.1:π, dt=0.1)
     # end
 
     setup = build_chamber()
-    configure_lasers!(setup, f_cl, f_sb, A)
+    configure_lasers!(setup, f_cl, f_sb, A, phi_1=phi_1, phi_2=phi_2)
 
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
     h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
@@ -220,10 +221,10 @@ function Q_noisy(t, f_cl, f_sb, A; N::Int=100, phase_grid=0:0.1:π, dt=0.1)
     return (1 - P_odd + C) / 2
 end
 
-function Q_varMS(t, f_cl, Δ, I; N = 1000, numMS = 6)
+function Q_varMS(t, f_cl, Δ, I; N = 1000, numMS = 6, phi_1 = 0.0, phi_2 = 0.0)
 
     setup = build_chamber()
-    configure_lasers!(setup, f_cl, Δ, I)
+    configure_lasers!(setup, f_cl, Δ, I, phi_1 = phi_1, phi_2 = phi_2)
 
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
     
