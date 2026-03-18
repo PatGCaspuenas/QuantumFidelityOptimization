@@ -27,8 +27,8 @@ end
 # ----------------- helpers -----------------
 
 @inline function _rand_in_box(rng::Random.AbstractRNG,
-                             lb::AbstractVector{<:Real},
-                             ub::AbstractVector{<:Real})
+    lb::AbstractVector{<:Real},
+    ub::AbstractVector{<:Real})
     d = length(lb)
     x = Vector{Float64}(undef, d)
     @inbounds for j in 1:d
@@ -47,23 +47,31 @@ function _validate_bounds(bounds)
 end
 
 function _fit_gp(X::Matrix{Float64}, y::Vector{Float64};
-                 obs_noise::Union{Nothing,Float64}=nothing)
+    obs_noise::Union{Nothing,Float64}=nothing)
     # X: d×n, y: n
     yμ = mean(y)
     yσ = max(std(y), 1e-12)
     ystd = (y .- yμ) ./ yσ
 
     d, _ = size(X)
-    ℓ0  = fill(0.3, d)
+    ℓ0 = fill(0.3, d)
     σf0 = 1.0
     σn0 = obs_noise === nothing ? 1e-5 : obs_noise
 
-    gp = GP(X, ystd, MeanZero(), Matern(3/2, ℓ0, σf0), σn0)
+    gp = GP(X, ystd, MeanZero(), Matern(3 / 2, ℓ0, σf0), σn0)
 
     if obs_noise === nothing
-        optimize!(gp)
+        try
+            optimize!(gp)
+        catch err
+            @warn "GP optimize! failed" err
+        end
     else
-        optimize!(gp; noise=false)
+        try
+            optimize!(gp; noise=false)
+        catch err
+            @warn "GP optimize! failed" err
+        end
     end
 
     return gp, yμ, yσ
@@ -100,21 +108,21 @@ Bayesian optimization using a Gaussian Process surrogate and Expected Improvemen
 Returns `(result::BOResult)`.
 """
 function bayesopt(f;
-                  bounds::Vector{Tuple{Float64,Float64}},
-                  n_init::Int=8,
-                  n_iter::Int=30,
-                  M::Int=2000,
-                  xi::Float64=0.01,
-                  maximize::Bool=true,
-                  rng::Random.AbstractRNG=Random.default_rng(),
-                  seed=nothing,
-                  obs_noise::Union{Nothing,Float64}=nothing)
+    bounds::Vector{Tuple{Float64,Float64}},
+    n_init::Int=8,
+    n_iter::Int=30,
+    M::Int=2000,
+    xi::Float64=0.01,
+    maximize::Bool=true,
+    rng::Random.AbstractRNG=Random.default_rng(),
+    seed=nothing,
+    obs_noise::Union{Nothing,Float64}=nothing)
 
     _validate_bounds(bounds)
     n_init ≥ 1 || throw(ArgumentError("n_init must be ≥ 1"))
     n_iter ≥ 0 || throw(ArgumentError("n_iter must be ≥ 0"))
-    M ≥ 1      || throw(ArgumentError("M must be ≥ 1"))
-    xi ≥ 0     || throw(ArgumentError("xi must be ≥ 0"))
+    M ≥ 1 || throw(ArgumentError("M must be ≥ 1"))
+    xi ≥ 0 || throw(ArgumentError("xi must be ≥ 0"))
 
     rng_local = seed === nothing ? rng : MersenneTwister(seed)
 
@@ -137,7 +145,7 @@ function bayesopt(f;
     end
 
     # BO loop
-    for i in (n_init + 1):n_total
+    for i in (n_init+1):n_total
         gp, yμ, yσ = _fit_gp(X[:, 1:(i-1)], y_int[1:(i-1)]; obs_noise=obs_noise)
         y_std = (y_int[1:(i-1)] .- yμ) ./ yσ
         fbest_std = maximum(y_std)
@@ -173,7 +181,7 @@ function bayesopt(f;
 
     # map back to user orientation
     y_user = maximize ? y_int : (-y_int)
-    y_rec  = maximize ? best_m : -best_m
+    y_rec = maximize ? best_m : -best_m
 
     return BOResult(X, y_user, bounds, n_init, n_iter, maximize, x_rec, y_rec)
 end

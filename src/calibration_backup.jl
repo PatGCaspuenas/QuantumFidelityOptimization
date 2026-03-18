@@ -90,15 +90,15 @@ function configure_lasers!(setup, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0)
 end
 
 """
-    evolve_reduced_density(setup, t; lamb_dicke_order=1) -> Matrix{Complex}
+    evolve_reduced_density(setup, t; dt=0.01, lamb_dicke_order=1) -> Matrix{Complex}
 
 Time-evolve |SS⟩ ⊗ |0⟩ under IonSim Hamiltonian and return the reduced 2-qubit density matrix
 as a plain complex matrix in the (SS, SD, DS, DD) basis.
 """
-function evolve_reduced_density(setup, t; lamb_dicke_order=1)
+function evolve_reduced_density(setup, t; dt=0.01, lamb_dicke_order=1)
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
     h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=lamb_dicke_order, rwa_cutoff=Inf)
-    tout = [0.0, t]
+    tout = 0:dt:t
     _, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
     ρ = ptrace(sol[end] ⊗ dagger(sol[end]), [3]).data
     return ρ
@@ -107,7 +107,7 @@ end
 # --- Public estimators
 
 """
-    ideal(t) -> NamedTuple
+    ideal(t; dt=0.01) -> NamedTuple
 
 Construct the standard MS-like setup from `t` (in µs-scale consistent with your timescale),
 choose symmetric detunings and an intensity inferred from a π-time heuristic, evolve ideally,
@@ -115,7 +115,7 @@ and return (fid, f_cl, f_sb, A, delta_phi).
 
 This function is deterministic and produces no I/O.
 """
-function ideal(t)
+function ideal(t; dt=0.01)
     setup = build_chamber()
     mode = setup.mode
     ν = frequency(mode)
@@ -145,41 +145,51 @@ function ideal(t)
     A = intensity_from_pitime!(1, pi_time, 1, ("S", "D"), setup.chamber)
     intensity_from_pitime!(2, pi_time, 1, ("S", "D"), setup.chamber)
 
-    ρ = evolve_reduced_density(setup, t)
+    ρ = evolve_reduced_density(setup, t; dt=dt)
     fid = bell_fidelity_phi_plus(ρ)
 
     return (fid=fid, f_cl=f_cl, f_sb=f_sb, A=A, delta_phi=0.0)
 end
 
 """
-    Q_det(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0) -> Real
+    Q_det(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, dt=0.01) -> Real
 
 Deterministic fidelity estimator: evolve ideally with specified `(f_cl, f_sb, A, phi_1, phi_2)`
 and compute `bell_fidelity_phi_plus` on the reduced state.
 """
-function Q_det(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0)
+function Q_det(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, dt=0.01)
     setup = build_chamber()
     configure_lasers!(setup, f_cl, f_sb, A, phi_1=phi_1, phi_2=phi_2)
-    ρ = evolve_reduced_density(setup, t)
+    ρ = evolve_reduced_density(setup, t; dt=dt)
     return bell_fidelity_phi_plus(ρ)
 end
 
 """
-    Q_noisy(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, N=100, phase_grid=0:0.1:π) -> Real
+    Q_noisy(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, N=100, phase_grid=0:0.1:π, dt=0.1) -> Real
 
 Noisy estimator based on sampling + parity scan + cosine fit.
 
 Requires `StatsBase` and `LsqFit`. This method attempts to load them at call-time
 and throws an informative error if unavailable.
 """
-function Q_noisy(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, N::Int=100, phase_grid=0:0.1:π)
+function Q_noisy(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, N::Int=100, phase_grid=0:0.1:π, dt=0.1)
+    # Call-time optional deps (cleaner than file-scope try/catch)
+    # local StatsBase, LsqFit
+    # try
+    #     @eval begin
+    #         import StatsBase
+    #         import LsqFit
+    #     end
+    # catch
+    #     throw(ArgumentError("Q_noisy requires StatsBase and LsqFit. Add them to the environment to use this method."))
+    # end
 
     setup = build_chamber()
     configure_lasers!(setup, f_cl, f_sb, A, phi_1=phi_1, phi_2=phi_2)
 
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
     h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
-    tout = [0.0, t]
+    tout = 0:dt:t
     _, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
 
     # Outcome probabilities in computational basis from projectors
@@ -225,7 +235,7 @@ function Q_noisy(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, N::Int=100, phase_grid=
     return (1 - P_odd + C) / 2
 end
 
-function Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, phi_1=0.0, phi_2=0.0)
+function Q_varMS(t, f_cl, Δ, I; N=1000, numMS=6, phi_1=0.0, phi_2=0.0)
 
     setup = build_chamber()
     configure_lasers!(setup, f_cl, Δ, I, phi_1=phi_1, phi_2=phi_2)
@@ -235,14 +245,12 @@ function Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, phi_1=0.0, phi_2=0.0)
     # setup the Hamiltonian
     h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
     # solve system
-    tout = [0.0, t]
-    _, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
+    tout = 0:0.1:t
+    tout, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
 
-    if numMS > 1
-        for n in 2:numMS
-            tout = [0.0, t]
-            _, sol = timeevolution.schroedinger_dynamic(tout, sol[end], h)
-        end
+    for n in 2:numMS
+        tout = 0:0.1:t
+        tout, sol = timeevolution.schroedinger_dynamic(tout, sol[end], h)
     end
 
     SS = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
@@ -250,22 +258,17 @@ function Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, phi_1=0.0, phi_2=0.0)
     SD = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
     DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
 
-    # Define success based on the number of gates
-    if isodd(numMS)
-        #  SS/DD
-        success_indices = [1, 2]
-    elseif numMS % 4 == 2
-        # DD
-        success_indices = [2]
-    else
-        # SS
-        success_indices = [1]
-    end
-
+    correlator_values = Dict(1 => -1, 2 => 1, 3 => -1, 4 => -1)
     weights = [SS, DD, SD, DS]
     samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
+    values = [correlator_values[c] for c in samples]
+    parity = 0
 
-    parity = count(s -> s in success_indices, samples)
+    for value in values
+        if value == 1
+            parity += 1
+        end
+    end
 
     return parity / N
 end

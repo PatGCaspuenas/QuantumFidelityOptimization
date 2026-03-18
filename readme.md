@@ -104,7 +104,7 @@ These are fast sanity checks and validate that the algorithms work and (for 2D) 
 
 ```bash
 julia --project=. examples/toy_standard_2d.jl
-julia --project=. examples/toy_standard_3d.jl
+op
 
 julia --project=. examples/toy_hetero_2d.jl
 julia --project=. examples/toy_hetero_3d.jl

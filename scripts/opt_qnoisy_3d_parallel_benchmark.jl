@@ -3,7 +3,7 @@ using Distributed
 using Statistics
 import Pkg
 
-# Add worker processes (use all available cores)
+
 if nprocs() == 1
     addprocs()
 end
@@ -14,28 +14,18 @@ Pkg.instantiate()
 @everywhere include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
 @everywhere using .CalibrationCode
 
-# Uncomment the line below to suppress warning messages (but also hides errors!)
-# redirect_stderr(devnull)
+const use_log_fidelity = false
+const optimize_det = true
 
-# -------------------------
-# Configuration Parameters
-# -------------------------
-const use_log_fidelity = false  # Set to true to optimize log(1-Q) instead of Q
-const optimize_det = true       # Set to true to optimize Q_det, false for Q_noisy
-
-# -------------------------
-# Baseline
-# -------------------------
 const t = 100.0
 base = CalibrationCode.ideal(t)
 const f_cl0, f_sb0, A0 = base.f_cl, base.f_sb, base.A
 
-# spans around baseline
-const span_fcl = 3e4
-const span_fsb = 3e4
-const span_A   = 6e4
+const span_kHz = 2.0
+const span_fcl = span_kHz * 1e3 * 2π
+const span_fsb = span_kHz * 1e3 * 2π
+const span_A = 1.2 * A0 - A0
 
-# Broadcast constants to all workers
 @everywhere const t = $t
 @everywhere const f_cl0 = $f_cl0
 @everywhere const f_sb0 = $f_sb0
@@ -44,27 +34,21 @@ const span_A   = 6e4
 @everywhere const span_fsb = $span_fsb
 @everywhere const span_A = $span_A
 
-# Broadcast configuration to all workers
 @everywhere const use_log_fidelity = $use_log_fidelity
 @everywhere const optimize_det = $optimize_det
 
-# u ∈ [-1,1]^3 -> physical params
-@everywhere u_to_params(u) = (f_cl0 + span_fcl*u[1],
-                               f_sb0 + span_fsb*u[2],
-                               A0    + span_A  *u[3])
+@everywhere u_to_params(u) = (f_cl0 + span_fcl * u[1],
+    f_sb0 + span_fsb * u[2],
+    A0 + span_A * u[3])
 
-# noise knob -> shots (tunable)
 @everywhere function N_from_sigma(σ::Float64)
-    # keep bounded for runtime sanity
     N = round(Int, 1 / (σ^2))
     return clamp(N, 20, 10000)
 end
 
 @everywhere function apply_log_fidelity(Q::Float64)
-    """Convert fidelity to log scale if enabled"""
     if use_log_fidelity
-        # Use log(1-error) = log(2-Q) for log scale (for Q close to 1)
-        return log(max(2.0 - Q, 1e-10))
+        return log(1.0 - Q, 10)
     else
         return Q
     end
@@ -75,7 +59,7 @@ end
     if optimize_det
         Q = CalibrationCode.Q_det(t, fcl, fsb, A)
     else
-        Q = CalibrationCode.Q_noisy(t, fcl, fsb, A; N=N_from_sigma(σ))#CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N_from_sigma(σ), numMS = 2)
+        Q = CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N_from_sigma(σ), numMS=2)#CalibrationCode.Q_noisy(t, fcl, fsb, A; N=N_from_sigma(σ))#
     end
     return apply_log_fidelity(Q)
 end
@@ -86,34 +70,29 @@ end
     return apply_log_fidelity(Q)
 end
 
-# Note: Q_true always returns deterministic Q_det (no log applied for comparison)
 
-σ_levels = [.03]
-bounds   = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
+σ_levels = [0.1412, 0.1, 0.06, 0.04472]
+bounds = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
 
-# -------------------------
-# Multiple Simulations with Fixed Hyperparameters
-# -------------------------
 α = 1.5
 κ = 1.9
-num_sims = 4
-fidelity_threshold = .995  # Set to a value (e.g., 0.95) to stop early when reached (ignored for log scale)
+num_sims = 10
+fidelity_threshold = 1 - 1 / N_from_sigma(σ_levels[end])
 
 optimization_mode = optimize_det ? "Q_det" : "Q_noisy"
-metric_type = use_log_fidelity ? "log(1-Q)" : "Q"
 
 println("=== Starting Parallel Simulations (Random Seeds) ===")
 println("Optimization mode: $optimization_mode")
-println("Metric: $metric_type")
 println("Fixed α = $α, κ = $κ")
 println("Number of simulations: $num_sims")
 if fidelity_threshold !== nothing && !use_log_fidelity
     println("Fidelity threshold: $fidelity_threshold")
 end
 
+start_time = time()
+
 random_seeds = rand(1:1000000, num_sims)
 
-# Run multiple simulations in parallel with random seeds
 results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
     try
         seed = random_seeds[sim_idx]
@@ -129,19 +108,19 @@ results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
             seed=seed,
             fidelity_threshold=fidelity_threshold
         )
-        
+
         # Always calculate true Q_det in original scale for reporting
         fcl, fsb, A = u_to_params(res.x_rec)
         Q_det_val = CalibrationCode.Q_det(t, fcl, fsb, A)
         n_iters = res.n_iter_actual > 0 ? res.n_iter_actual : 120
-        
+
         # Count noise level usage
         σy_used = res.σy[1:n_iters+12]  # n_init=12 + actual iterations
         noise_counts = Dict(σ => count(==(σ), σy_used) for σ in σ_levels)
-        
+
         println("Simulation $sim_idx → Q_det = $(Q_det_val), metric = $(res.y_last), iterations: $n_iters")
         flush(stdout)
-        
+
         (
             sim_idx=sim_idx,
             seed=seed,
@@ -163,9 +142,6 @@ results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
     end
 end
 
-# -------------------------
-# Find and Display Results
-# -------------------------
 Q_det_values = [r.Q_det for r in results_grid]
 
 best_idx = argmax(Q_det_values)
@@ -182,7 +158,6 @@ avg_iterations = mean(iter_values)
 med_iterations = median(iter_values)
 std_iterations = std(iter_values)
 
-# Aggregate noise level usage across all simulations
 total_noise_counts = Dict(σ => 0 for σ in σ_levels)
 for r in results_grid
     for (σ, count) in r.noise_counts
@@ -193,8 +168,7 @@ total_calls = sum(values(total_noise_counts))
 
 println("\n=== RESULTS SUMMARY ===")
 optimization_mode = optimize_det ? "Q_det" : "Q_noisy"
-metric_type = use_log_fidelity ? "log(2-Q)" : "Q"
-println("Optimization mode: $optimization_mode (Metric: $metric_type)")
+println("Optimization mode: $optimization_mode")
 println("Best Q_det = ", best_result.Q_det, " (Simulation ", best_result.sim_idx, ")")
 println("Average Q_det = ", avg_Q_det, " ± ", std_Q_det)
 println("Median Q_det = ", med_Q_det)
@@ -219,9 +193,6 @@ println("Recommended f_sb = ", fsb_rec)
 println("Recommended A    = ", A_rec)
 println("Baseline   f_cl = ", f_cl0, "  f_sb = ", f_sb0, "  A = ", A0)
 
-# -------------------------
-# Summary Table
-# -------------------------
 println("\n=== All Results ===")
 σ_headers = join(["σ=$(σ)" for σ in sort(collect(σ_levels), rev=true)], "\t")
 println("Sim\tSeed\tQ_det\tQ_noisy\tIterations\t$σ_headers")
@@ -230,14 +201,18 @@ for r in results_grid
     println("$(r.sim_idx)\t$(r.seed)\t$(r.Q_det)\t$(r.Q_noisy)\t$(r.n_iterations)\t$noise_str")
 end
 
-# -------------------------
-# Write Results to File
-# -------------------------
-output_file = joinpath(@__DIR__, "benchmark_results_qdet.txt")
+elapsed_seconds = time() - start_time
+elapsed_total = round(Int, elapsed_seconds)
+elapsed_hours = elapsed_total ÷ 3600
+elapsed_minutes = (elapsed_total % 3600) ÷ 60
+elapsed_secs = elapsed_total % 60
+elapsed_hms = string(elapsed_hours, ":", lpad(string(elapsed_minutes), 2, '0'), ":", lpad(string(elapsed_secs), 2, '0'))
+output_file = joinpath(@__DIR__, "benchmark_results_test.txt")
 open(output_file, "w") do io
     println(io, "=== BENCHMARK RESULTS ===")
     println(io, "Fixed α = $α, κ = $κ")
     println(io, "Number of simulations: $num_sims")
+    println(io, "Elapsed time: $elapsed_hms")
     println(io, "")
     println(io, "=== RESULTS SUMMARY ===")
     println(io, "Best Q_det = $(best_result.Q_det) (Simulation $(best_result.sim_idx), Seed $(best_result.seed), Iterations $(best_result.n_iterations))")

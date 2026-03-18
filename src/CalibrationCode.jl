@@ -25,17 +25,19 @@ include("bayes_MF_opt.jl")          # N-fidelity augmented-input GP (z-levels)
 # -------------------------------
 
 # Estimators / calibration
-export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy
-export coordinate_search, trial
+export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy, Q_varMS
 
 # Homoscedastic BO
 export BOResult, bayesopt
 
 # Heteroscedastic BO
-export HeteroGP, HeteroBOResult
+export HeteroGP, HeteroBOResult, PretrainedHeteroGPState
 export fit_heterogp, predict_latent
 export choose_sigma_threshold, count_noise_levels
 export bayesopt_ucb_threshold
+export build_pretrained_state, pretrained_state_from_namedtuple
+export save_pretrained_state_script, load_pretrained_state_script
+export pretrain_heterogp_deterministic
 
 # 2-fidelity co-kriging BO
 export CoKrigResult, cokrig_bayesopt
