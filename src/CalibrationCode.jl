@@ -13,7 +13,7 @@ include("coordinate_search.jl")
 
 # --- Bayesian optimization variants ---
 include("bayes_opt.jl")             # homoscedastic GP + EI
-include("bayes_hetero_opt.jl")      # heteroscedastic GP + UCB + σ-threshold
+include("bayes_hetero_opt.jl")  # heteroscedastic GP + UCB + σ-threshold
 include("bayes_cokrig_opt.jl")      # 2-fidelity AR(1) co-kriging
 include("bayes_MF_opt.jl")          # N-fidelity augmented-input GP (z-levels)
 
@@ -31,13 +31,10 @@ export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy, Q_varMS
 export BOResult, bayesopt
 
 # Heteroscedastic BO
-export HeteroGP, HeteroBOResult, PretrainedHeteroGPState
+export HeteroGP, HeteroBOResult
 export fit_heterogp, predict_latent
 export choose_sigma_threshold, count_noise_levels
 export bayesopt_ucb_threshold
-export build_pretrained_state, pretrained_state_from_namedtuple
-export save_pretrained_state_script, load_pretrained_state_script
-export pretrain_heterogp_deterministic
 
 # 2-fidelity co-kriging BO
 export CoKrigResult, cokrig_bayesopt

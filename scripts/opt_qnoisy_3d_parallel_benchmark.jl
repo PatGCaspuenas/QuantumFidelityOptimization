@@ -76,8 +76,27 @@ bounds = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
 
 α = 1.5
 κ = 1.9
-num_sims = 10
+num_sims = 40
 fidelity_threshold = 1 - 1 / N_from_sigma(σ_levels[end])
+
+# --- Pretrained GP hyperparameters ---
+# freeze_mode options:
+#   :none          — no pretraining, full MLE from scratch (original behavior)
+#   :lengthscales  — fix ℓ from pretrained θ, adapt σf and noise scale
+#   :all           — fix all hyperparameters (ℓ, σf, c) throughout BO
+#
+# Run `julia --project=. scripts/pretrain_gp_3d.jl` first to generate the pretrained file.
+const pretrain_file = joinpath(@__DIR__, "data", "pretrained_theta_3d.jl")
+const freeze_mode = :lengthscales
+const n_freeze_iters = 40  # fix ℓ for first 40 iterations, then release to full MLE
+
+pretrained_θ = if isfile(pretrain_file)
+    include(pretrain_file)
+    pretrained_theta_3d()
+else
+    @warn "Pretrained file not found: $pretrain_file — running without pretraining (freeze_mode ignored)"
+    nothing
+end
 
 optimization_mode = optimize_det ? "Q_det" : "Q_noisy"
 
@@ -93,9 +112,15 @@ start_time = time()
 
 random_seeds = rand(1:1000000, num_sims)
 
+# Capture pretraining config as locals so pmap serializes values, not globals.
+_pretrained_θ = pretrained_θ
+_freeze_mode   = freeze_mode
+_n_freeze_iters = n_freeze_iters
+_random_seeds  = random_seeds
+
 results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
     try
-        seed = random_seeds[sim_idx]
+        seed = _random_seeds[sim_idx]
         println("Starting simulation...")
         flush(stdout)
         res = CalibrationCode.bayesopt_ucb_threshold(Q_fun;
@@ -106,7 +131,10 @@ results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
             κ=κ,
             α=α,
             seed=seed,
-            fidelity_threshold=fidelity_threshold
+            fidelity_threshold=fidelity_threshold,
+            pretrained_θ=_pretrained_θ,
+            freeze_mode=_freeze_mode,
+            n_freeze_iters=_n_freeze_iters,
         )
 
         # Always calculate true Q_det in original scale for reporting
