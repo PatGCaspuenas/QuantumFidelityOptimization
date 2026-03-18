@@ -5,7 +5,6 @@ using Random
 using Statistics
 using LinearAlgebra
 using Optim
-using Dates
 
 # -------------------------
 # Kernel and covariance
@@ -55,228 +54,6 @@ struct HeteroGP
     θ::Vector{Float64}     # log-parameters
 end
 
-struct PretrainedHeteroGPState
-    θ::Vector{Float64}
-    yμ::Float64
-    yσ::Float64
-    bounds::Vector{Tuple{Float64,Float64}}
-    σ_levels::Vector{Float64}
-    learn_noise_scale::Bool
-    ℓ_bounds::Tuple{Float64,Float64}
-    σf_bounds::Tuple{Float64,Float64}
-    c_bounds::Tuple{Float64,Float64}
-    objective_mode::Symbol
-    numMS::Int
-    seed::Union{Nothing,Int}
-    trained_at::String
-end
-
-@inline function _validate_scaling_stats(yμ::Float64, yσ::Float64)
-    isfinite(yμ) || throw(ArgumentError("yμ must be finite"))
-    (isfinite(yσ) && yσ > 0) || throw(ArgumentError("yσ must be finite and > 0"))
-    return nothing
-end
-
-@inline function _state_to_namedtuple(s::PretrainedHeteroGPState)
-    return (
-        θ=copy(s.θ),
-        yμ=s.yμ,
-        yσ=s.yσ,
-        bounds=copy(s.bounds),
-        σ_levels=copy(s.σ_levels),
-        learn_noise_scale=s.learn_noise_scale,
-        ℓ_bounds=s.ℓ_bounds,
-        σf_bounds=s.σf_bounds,
-        c_bounds=s.c_bounds,
-        objective_mode=s.objective_mode,
-        numMS=s.numMS,
-        seed=s.seed,
-        trained_at=s.trained_at,
-    )
-end
-
-function pretrained_state_from_namedtuple(nt)
-    hasproperty(nt, :θ) || throw(ArgumentError("Missing field θ in pretrained state"))
-    hasproperty(nt, :yμ) || throw(ArgumentError("Missing field yμ in pretrained state"))
-    hasproperty(nt, :yσ) || throw(ArgumentError("Missing field yσ in pretrained state"))
-    hasproperty(nt, :bounds) || throw(ArgumentError("Missing field bounds in pretrained state"))
-    hasproperty(nt, :σ_levels) || throw(ArgumentError("Missing field σ_levels in pretrained state"))
-
-    state = PretrainedHeteroGPState(
-        Vector{Float64}(nt.θ),
-        Float64(nt.yμ),
-        Float64(nt.yσ),
-        Vector{Tuple{Float64,Float64}}(nt.bounds),
-        Vector{Float64}(nt.σ_levels),
-        hasproperty(nt, :learn_noise_scale) ? Bool(nt.learn_noise_scale) : true,
-        hasproperty(nt, :ℓ_bounds) ? Tuple{Float64,Float64}(nt.ℓ_bounds) : (0.05, 1.5),
-        hasproperty(nt, :σf_bounds) ? Tuple{Float64,Float64}(nt.σf_bounds) : (0.3, 2.0),
-        hasproperty(nt, :c_bounds) ? Tuple{Float64,Float64}(nt.c_bounds) : (0.3, 3.0),
-        hasproperty(nt, :objective_mode) ? Symbol(nt.objective_mode) : :unknown,
-        hasproperty(nt, :numMS) ? Int(nt.numMS) : 0,
-        hasproperty(nt, :seed) ? (nt.seed === nothing ? nothing : Int(nt.seed)) : nothing,
-        hasproperty(nt, :trained_at) ? String(nt.trained_at) : string(Dates.now()),
-    )
-
-    _validate_scaling_stats(state.yμ, state.yσ)
-    _validate_bounds(state.bounds)
-    isempty(state.σ_levels) && throw(ArgumentError("σ_levels must be non-empty"))
-    return state
-end
-
-function build_pretrained_state(gp::HeteroGP;
-                                bounds::Vector{Tuple{Float64,Float64}},
-                                σ_levels::Vector{Float64},
-                                learn_noise_scale::Bool=true,
-                                ℓ_bounds::Tuple{Float64,Float64}=(0.05, 1.5),
-                                σf_bounds::Tuple{Float64,Float64}=(0.3, 2.0),
-                                c_bounds::Tuple{Float64,Float64}=(0.3, 3.0),
-                                objective_mode::Symbol=:deterministic,
-                                numMS::Int=0,
-                                seed::Union{Nothing,Int}=nothing,
-                                trained_at::String=string(Dates.now()))
-    _validate_bounds(bounds)
-    isempty(σ_levels) && throw(ArgumentError("σ_levels must be non-empty"))
-    _validate_scaling_stats(gp.yμ, gp.yσ)
-    return PretrainedHeteroGPState(
-        copy(gp.θ),
-        gp.yμ,
-        gp.yσ,
-        copy(bounds),
-        copy(σ_levels),
-        learn_noise_scale,
-        ℓ_bounds,
-        σf_bounds,
-        c_bounds,
-        objective_mode,
-        numMS,
-        seed,
-        trained_at,
-    )
-end
-
-function save_pretrained_state_script(output_path::AbstractString,
-                                      state::PretrainedHeteroGPState;
-                                      loader_name::AbstractString="load_pretrained_heterogp_state")
-    open(output_path, "w") do io
-        println(io, "# Auto-generated pretrained heteroscedastic GP state")
-        println(io, "# Generated at ", state.trained_at)
-        println(io)
-        println(io, "function ", loader_name, "()")
-        println(io, "    return (")
-        println(io, "        θ=", repr(state.θ), ",")
-        println(io, "        yμ=", repr(state.yμ), ",")
-        println(io, "        yσ=", repr(state.yσ), ",")
-        println(io, "        bounds=", repr(state.bounds), ",")
-        println(io, "        σ_levels=", repr(state.σ_levels), ",")
-        println(io, "        learn_noise_scale=", repr(state.learn_noise_scale), ",")
-        println(io, "        ℓ_bounds=", repr(state.ℓ_bounds), ",")
-        println(io, "        σf_bounds=", repr(state.σf_bounds), ",")
-        println(io, "        c_bounds=", repr(state.c_bounds), ",")
-        println(io, "        objective_mode=", repr(state.objective_mode), ",")
-        println(io, "        numMS=", repr(state.numMS), ",")
-        println(io, "        seed=", repr(state.seed), ",")
-        println(io, "        trained_at=", repr(state.trained_at))
-        println(io, "    )")
-        println(io, "end")
-    end
-    return output_path
-end
-
-function load_pretrained_state_script(path::AbstractString;
-                                      loader_symbol::Symbol=:load_pretrained_heterogp_state)
-    m = Module()
-    Base.include(m, path)
-    isdefined(m, loader_symbol) || throw(ArgumentError("Loader $(loader_symbol) not found in $(path)"))
-    loader = getfield(m, loader_symbol)
-    # Avoid world-age errors when calling methods defined by dynamic include.
-    nt = Base.invokelatest(loader)
-    return pretrained_state_from_namedtuple(nt)
-end
-
-function pretrain_heterogp_deterministic(f_det;
-                                         bounds::Vector{Tuple{Float64,Float64}},
-                                         σ_levels::Union{Nothing,Vector{Float64}}=nothing,
-                                         deployment_σ_levels::Union{Nothing,Vector{Float64}}=σ_levels,
-                                         n_samples::Int=256,
-                                         n_passes::Int=1,
-                                         σ_train::Float64=0.0,
-                                         learn_noise_scale::Bool=true,
-                                         n_restarts::Int=8,
-                                         ℓ_bounds::Tuple{Float64,Float64}=(0.05, 1.5),
-                                         σf_bounds::Tuple{Float64,Float64}=(0.3, 2.0),
-                                         c_bounds::Tuple{Float64,Float64}=(0.3, 3.0),
-                                         rng::Random.AbstractRNG=Random.default_rng(),
-                                         seed=nothing,
-                                         numMS::Int=0,
-                                         output_script_path::Union{Nothing,AbstractString}=nothing)
-    _validate_bounds(bounds)
-    isfinite(σ_train) || throw(ArgumentError("σ_train must be finite"))
-    σ_train ≥ 0 || throw(ArgumentError("σ_train must be ≥ 0"))
-    n_samples ≥ 1 || throw(ArgumentError("n_samples must be ≥ 1"))
-    n_passes ≥ 1 || throw(ArgumentError("n_passes must be ≥ 1"))
-
-    state_σ_levels = deployment_σ_levels === nothing ? Float64[0.0] : copy(deployment_σ_levels)
-    isempty(state_σ_levels) && throw(ArgumentError("deployment_σ_levels must be non-empty when provided"))
-    all(s -> isfinite(s) && s ≥ 0, state_σ_levels) || throw(ArgumentError("deployment_σ_levels must be finite and ≥ 0"))
-
-    rng_local = seed === nothing ? rng : MersenneTwister(seed)
-    lb = Float64[b[1] for b in bounds]
-    ub = Float64[b[2] for b in bounds]
-    d = length(bounds)
-
-    n_total = n_samples * n_passes
-    X = Matrix{Float64}(undef, d, n_total)
-    y = Vector{Float64}(undef, n_total)
-    σy = fill(σ_train, n_total)
-
-    θ_prev = nothing
-    gp = nothing
-
-    for pass in 1:n_passes
-        i0 = (pass - 1) * n_samples + 1
-        i1 = pass * n_samples
-
-        for i in i0:i1
-            x = _rand_in_box(rng_local, lb, ub)
-            X[:, i] = x
-            y[i] = f_det(x)
-        end
-
-        gp = fit_heterogp(X[:, 1:i1], y[1:i1], σy[1:i1];
-                          jitter=1e-8,
-                          learn_hypers=true,
-                          learn_noise_scale=learn_noise_scale,
-                          n_restarts=n_restarts,
-                          θ_init=θ_prev,
-                          ℓ_bounds=ℓ_bounds,
-                          σf_bounds=σf_bounds,
-                          c_bounds=c_bounds,
-                          rng=rng_local)
-
-        θ_prev = gp.θ
-    end
-
-    gp === nothing && throw(ArgumentError("Pretraining failed to produce a GP model"))
-
-    state = build_pretrained_state(gp;
-                                   bounds=bounds,
-                                   σ_levels=state_σ_levels,
-                                   learn_noise_scale=learn_noise_scale,
-                                   ℓ_bounds=ℓ_bounds,
-                                   σf_bounds=σf_bounds,
-                                   c_bounds=c_bounds,
-                                   objective_mode=:deterministic,
-                                   numMS=numMS,
-                                   seed=(seed === nothing ? nothing : Int(seed)))
-
-    if output_script_path !== nothing
-        save_pretrained_state_script(output_script_path, state)
-    end
-
-    return (gp=gp, state=state, n_points=n_total, n_passes=n_passes, n_samples_per_pass=n_samples)
-end
-
 function _validate_gp_inputs(X, y, σy)
     size(X, 2) == length(y) || throw(DimensionMismatch("size(X,2) must equal length(y)"))
     length(y) == length(σy) || throw(DimensionMismatch("length(y) must equal length(σy)"))
@@ -299,7 +76,6 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
                       learn_hypers::Bool=true,
                       learn_noise_scale::Bool=true,
                       n_restarts::Int=6,
-                      y_stats::Union{Nothing,Tuple{Float64,Float64}}=nothing,
                       θ_init::Union{Nothing,Vector{Float64}}=nothing,
                       ℓ_bounds::Tuple{Float64,Float64}=(0.05, 1.5),
                       σf_bounds::Tuple{Float64,Float64}=(0.3, 2.0),
@@ -309,13 +85,8 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
     _validate_gp_inputs(X, y, σy)
     jitter > 0 || throw(ArgumentError("jitter must be > 0"))
 
-    if y_stats === nothing
-        yμ = mean(y)
-        yσ = max(std(y), 1e-12)
-    else
-        yμ, yσ = y_stats
-        _validate_scaling_stats(yμ, yσ)
-    end
+    yμ = mean(y)
+    yσ = max(std(y), 1e-12)
     ystd = (y .- yμ) ./ yσ
     σstd0 = (σy ./ yσ)
 
@@ -447,7 +218,7 @@ end
 # BO structures + utilities
 # -------------------------
 
-mutable struct HeteroBOResult
+struct HeteroBOResult
     X::Matrix{Float64}                    # d×n
     y::Vector{Float64}                    # sign-adjusted if maximize=false
     σy::Vector{Float64}                   # noise std per observation
@@ -458,13 +229,6 @@ mutable struct HeteroBOResult
     maximize::Bool
     x_rec::Vector{Float64}
     y_rec::Float64
-    n_iter_actual::Int                    # actual iterations if early stopped
-    y_last::Float64                       # latest observed value in original objective scale
-end
-
-# Constructor with default value for n_iter_actual
-function HeteroBOResult(X, y, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec)
-    return HeteroBOResult(X, y, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec, 0, NaN)
 end
 
 @inline function _validate_bounds(bounds)
@@ -547,8 +311,6 @@ Objective is `f(x, σ)`.
 
 Set `maximize=false` to minimize.
 Use `seed` for determinism without affecting the global RNG.
-Set `fidelity_threshold` to stop early when the latest measurement reaches this threshold
-(compared in the original objective scale and respecting `maximize`).
 """
 function bayesopt_ucb_threshold(f;
                                bounds::Vector{Tuple{Float64,Float64}},
@@ -561,17 +323,9 @@ function bayesopt_ucb_threshold(f;
                                α::Float64=0.5,
                                maximize::Bool=true,
                                hyper_every::Int=10,
-                               freeze_theta::Bool=false,
-                               pretrained_state::Union{Nothing,PretrainedHeteroGPState}=nothing,
-                               use_pretrained_scaling::Bool=true,
-                               learn_noise_scale::Bool=true,
-                               ℓ_bounds::Tuple{Float64,Float64}=(0.05, 1.5),
-                               σf_bounds::Tuple{Float64,Float64}=(0.3, 2.0),
-                               c_bounds::Tuple{Float64,Float64}=(0.3, 3.0),
                                rng::Random.AbstractRNG=Random.default_rng(),
                                seed=nothing,
-                               verbose::Bool=false,
-                               fidelity_threshold=nothing)
+                               verbose::Bool=false)
 
     _validate_bounds(bounds)
     isempty(σ_levels) && throw(ArgumentError("σ_levels must be non-empty"))
@@ -581,15 +335,6 @@ function bayesopt_ucb_threshold(f;
     M_rec ≥ 1  || throw(ArgumentError("M_rec must be ≥ 1"))
     κ ≥ 0      || throw(ArgumentError("κ must be ≥ 0"))
     α ≥ 0      || throw(ArgumentError("α must be ≥ 0"))
-
-    if pretrained_state !== nothing
-        length(pretrained_state.bounds) == length(bounds) || throw(ArgumentError("Pretrained bounds dimension mismatch"))
-        pretrained_state.bounds == bounds || throw(ArgumentError("Pretrained bounds do not match runtime bounds"))
-        pretrained_state.σ_levels == σ_levels || throw(ArgumentError("Pretrained σ_levels do not match runtime σ_levels"))
-        if freeze_theta && length(pretrained_state.θ) != (length(bounds) + (learn_noise_scale ? 2 : 1))
-            throw(ArgumentError("Pretrained θ length does not match current model configuration"))
-        end
-    end
 
     rng_local = seed === nothing ? rng : MersenneTwister(seed)
 
@@ -612,25 +357,17 @@ function bayesopt_ucb_threshold(f;
         y[i] = f_eval(x, σ0)
     end
 
-    θ_prev = pretrained_state === nothing ? nothing : copy(pretrained_state.θ)
-    scale_stats = (pretrained_state !== nothing && use_pretrained_scaling) ? (pretrained_state.yμ, pretrained_state.yσ) : nothing
+    θ_prev = nothing
 
     for it in 1:n_iter
         idx = n_init + it
         do_opt = (it == 1) || (hyper_every > 0 && it % hyper_every == 0)
-        if freeze_theta
-            do_opt = false
-        end
 
         gp = fit_heterogp(X[:, 1:(idx-1)], y[1:(idx-1)], σy[1:(idx-1)];
                           θ_init=θ_prev,
                           learn_hypers=do_opt,
-                          learn_noise_scale=learn_noise_scale,
+                          learn_noise_scale=true,
                           n_restarts=do_opt ? 6 : 0,
-                          y_stats=scale_stats,
-                          ℓ_bounds=ℓ_bounds,
-                          σf_bounds=σf_bounds,
-                          c_bounds=c_bounds,
                           jitter=1e-8,
                           rng=rng_local)
 
@@ -655,62 +392,20 @@ function bayesopt_ucb_threshold(f;
 
         X[:, idx] = best_x
         σy[idx] = σ_next
-        y_latest_eval = f_eval(best_x, σ_next)
-        y[idx] = y_latest_eval
+        y[idx] = f_eval(best_x, σ_next)
 
         if verbose
             @info "it=$it best_acq=$best_a σ=$σ_next"
         end
-        
-        # Check fidelity threshold using f_eval at x_rec (not the latest sampled point)
-        # Exclude y_rec_raw == 1.0 from triggering early stop (likely noisy artifact)
-        if fidelity_threshold !== nothing
-            x_rec, m_rec = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
-            y_rec_eval = f_eval(x_rec, σ_next)
-            y_rec_raw = maximize ? y_rec_eval : -y_rec_eval
-            reached = maximize ? (y_rec_raw >= fidelity_threshold) : (y_rec_raw <= fidelity_threshold)
-            if reached && y_rec_raw != 1.0
-                # Trim arrays to actual size and record iterations
-                X = X[:, 1:idx]
-                y = y[1:idx]
-                σy = σy[1:idx]
-                n_iter_actual = it
-                if verbose
-                    @info "Fidelity threshold $fidelity_threshold reached at iteration $it"
-                end
-
-                y_out = maximize ? y : (-y)
-                y_rec = y_rec_raw
-                result = HeteroBOResult(X, y_out, σy, bounds, σ_levels, n_init, n_iter_actual, maximize, x_rec, y_rec)
-                result.n_iter_actual = n_iter_actual
-                result.y_last = y_rec_raw
-                return result
-            end
-        end
     end
 
-    gp = fit_heterogp(X, y, σy;
-                      θ_init=θ_prev,
-                      learn_hypers=!freeze_theta,
-                      learn_noise_scale=learn_noise_scale,
-                      n_restarts=freeze_theta ? 0 : 8,
-                      y_stats=scale_stats,
-                      ℓ_bounds=ℓ_bounds,
-                      σf_bounds=σf_bounds,
-                      c_bounds=c_bounds,
-                      jitter=1e-8,
-                      rng=rng_local)
+    gp = fit_heterogp(X, y, σy; θ_init=θ_prev, learn_hypers=true, learn_noise_scale=true,
+                      n_restarts=8, jitter=1e-8, rng=rng_local)
 
     x_rec, m_rec = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
 
     y_out = maximize ? y : (-y)
-    y_rec_eval = f_eval(x_rec, σy[end])
-    y_rec = maximize ? y_rec_eval : -y_rec_eval
+    y_rec = maximize ? m_rec : -m_rec
 
-    y_last_eval = y_rec_eval
-    y_last_raw = maximize ? y_last_eval : -y_last_eval
-    result = HeteroBOResult(X, y_out, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec)
-    result.n_iter_actual = n_iter
-    result.y_last = y_last_raw
-    return result
+    return HeteroBOResult(X, y_out, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec)
 end
