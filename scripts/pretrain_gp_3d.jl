@@ -29,7 +29,7 @@ function Q_det_obj(u)
 end
 
 const bounds = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
-const n_pretrain = 400
+const n_pretrain = 500
 const pretrain_seed = 42
 
 println("=== Pretraining GP hyperparameters on Q_det (3D) ===")

@@ -142,32 +142,33 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
     end
 
     # starting point
+    _θ_ε = 1e-4  # small inset from boundary to avoid Fminbox boundary rejection
     θ0 = Vector{Float64}(undef, p_opt)
     if use_fixed_ℓ
         # Warm-start σf (and c) from a full-length θ_init if available
         if θ_init !== nothing && length(θ_init) >= d + 1
-            θ0[1] = clamp(θ_init[d+1], lower[1], upper[1])
+            θ0[1] = clamp(θ_init[d+1], lower[1] + _θ_ε, upper[1] - _θ_ε)
             if learn_noise_scale && length(θ_init) >= d + 2
-                θ0[2] = clamp(θ_init[d+2], lower[2], upper[2])
+                θ0[2] = clamp(θ_init[d+2], lower[2] + _θ_ε, upper[2] - _θ_ε)
             elseif learn_noise_scale
-                θ0[2] = clamp(log(1.0), lower[2], upper[2])
+                θ0[2] = clamp(log(1.0), lower[2] + _θ_ε, upper[2] - _θ_ε)
             end
         elseif θ_init !== nothing && length(θ_init) == p_opt
-            θ0 .= clamp.(θ_init, lower, upper)
+            θ0 .= clamp.(θ_init, lower .+ _θ_ε, upper .- _θ_ε)
         else
-            θ0[1] = clamp(log(1.0), lower[1], upper[1])
-            if learn_noise_scale; θ0[2] = clamp(log(1.0), lower[2], upper[2]); end
+            θ0[1] = clamp(log(1.0), lower[1] + _θ_ε, upper[1] - _θ_ε)
+            if learn_noise_scale; θ0[2] = clamp(log(1.0), lower[2] + _θ_ε, upper[2] - _θ_ε); end
         end
     else
         if θ_init !== nothing && length(θ_init) == p_opt
-            θ0 .= clamp.(θ_init, lower, upper)
+            θ0 .= clamp.(θ_init, lower .+ _θ_ε, upper .- _θ_ε)
         else
             θ0[1:d] .= log(0.3)
             θ0[d+1]  = log(1.0)
             if learn_noise_scale
                 θ0[d+2] = log(1.0)
             end
-            θ0 .= clamp.(θ0, lower, upper)
+            θ0 .= clamp.(θ0, lower .+ _θ_ε, upper .- _θ_ε)
         end
     end
 
@@ -363,7 +364,8 @@ function bayesopt_ucb_threshold(f;
                                pretrained_θ::Union{Nothing,Vector{Float64}}=nothing,
                                freeze_mode::Symbol=:none,
                                n_freeze_iters::Int=typemax(Int),
-                               fidelity_threshold::Union{Nothing,Float64}=nothing)
+                               fidelity_threshold::Union{Nothing,Float64}=nothing,
+                               explore_frac::Float64=0.0)
 
     _validate_bounds(bounds)
     isempty(σ_levels) && throw(ArgumentError("σ_levels must be non-empty"))
@@ -451,6 +453,10 @@ function bayesopt_ucb_threshold(f;
         end
 
         σ_next = choose_sigma_threshold(best_s2, σ_levels; α=α)
+
+        if explore_frac > 0.0 && rand(rng_local) < explore_frac
+            σ_next = maximum(σ_levels)
+        end
 
         X[:, idx] = best_x
         σy[idx] = σ_next

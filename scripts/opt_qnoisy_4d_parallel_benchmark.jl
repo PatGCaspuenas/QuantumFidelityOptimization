@@ -8,6 +8,8 @@ if nprocs() == 1
     addprocs()
 end
 
+try
+
 Pkg.activate(joinpath(@__DIR__, ".."))
 Pkg.instantiate()
 
@@ -20,16 +22,16 @@ Pkg.instantiate()
 # -------------------------
 # Baseline
 # -------------------------
-const t = 100.0
+t = 100.0
 base = CalibrationCode.ideal(t)
-const f_cl0, f_sb0, A0 = base.f_cl, base.f_sb, base.A
+f_cl0, f_sb0, A0 = base.f_cl, base.f_sb, base.A
 
 # spans around baseline
-const span_fcl = 3e4
-const span_fsb = 3e4
-const span_A   = 6e4
-const phi0     = 0.0      # baseline phase
-const span_phi = π        # search over full phase range [0, 2π]
+span_fcl = 3e4
+span_fsb = 3e4
+span_A   = 6e4
+phi0     = 0.0      # baseline phase
+span_phi = π        # search over full phase range [0, 2π]
 
 # Broadcast constants to all workers
 @everywhere const t = $t
@@ -249,3 +251,7 @@ open(output_file, "w") do io
 end
 
 println("\nResults written to: $output_file")
+
+finally
+    rmprocs(workers())
+end

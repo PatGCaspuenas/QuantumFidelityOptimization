@@ -7,6 +7,8 @@ if nprocs() == 1
     addprocs()
 end
 
+try
+
 Pkg.activate(joinpath(@__DIR__, ".."))
 Pkg.instantiate()
 
@@ -20,14 +22,14 @@ Pkg.instantiate()
 # -------------------------
 # Baseline
 # -------------------------
-const t = 100.0
+t = 100.0
 base = CalibrationCode.ideal(t)
-const f_cl0, f_sb0, A0 = base.f_cl, base.f_sb, base.A
+f_cl0, f_sb0, A0 = base.f_cl, base.f_sb, base.A
 
 # spans around baseline
-const span_fcl = 3e4
-const span_fsb = 3e4
-const span_A   = 6e4
+span_fcl = 3e4
+span_fsb = 3e4
+span_A   = 6e4
 
 # Broadcast constants to all workers
 @everywhere const t = $t
@@ -211,3 +213,7 @@ end
 
 println("\nResults written to: $output_file")
 flush(stdout)
+
+finally
+    rmprocs(workers())
+end

@@ -262,7 +262,7 @@ function Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, phi_1=0.0, phi_2=0.0)
         success_indices = [1]
     end
 
-    weights = [SS, DD, SD, DS]
+    weights = max.([SS, DD, SD, DS], 0.0)  # clamp floating-point negatives (same as Q_noisy)
     samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
 
     parity = count(s -> s in success_indices, samples)
