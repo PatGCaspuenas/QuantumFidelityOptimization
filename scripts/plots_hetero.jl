@@ -2,7 +2,7 @@
 # Plots for heteroscedastic HeteroBOResult
 
 using Plots
-using CalibrationCode
+using .CalibrationCode
 
 function _grid(bounds, nx, ny)
     lb = [b[1] for b in bounds]

@@ -90,7 +90,7 @@ function local_scan_fcl_fsb(; t::Float64=100.0,
     return p
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
+if !isinteractive()
     local_scan_fcl_fsb(; t=100.0, span=2e4, n=100,
                         outfile="fidelity_local_scan_offsets.png",
                         method=:det, N=200, verbose=false)

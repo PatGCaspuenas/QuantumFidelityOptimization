@@ -4,7 +4,7 @@
 using Plots
 using Random, Statistics
 using Distributions, GaussianProcesses
-using CalibrationCode
+using .CalibrationCode
 
 function _grid(bounds, nx, ny)
     lb = [b[1] for b in bounds]

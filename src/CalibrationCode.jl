@@ -5,6 +5,14 @@ module CalibrationCode
 using Random
 using Statistics
 using LinearAlgebra
+using Logging
+
+# Physics packages (needed by calibration.jl and Q_noisy/Q_det)
+using IonSim
+using QuantumOptics
+using StatsBase
+using LsqFit
+const pc = IonSim.PhysicalConstants
 
 # --- Physics / estimators (IonSim + QuantumOptics live in calibration.jl) ---
 include("calibration.jl")
