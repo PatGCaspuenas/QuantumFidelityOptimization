@@ -71,7 +71,7 @@ println("""
 Setup complete.
 
 To run the project:
-  julia --project=. src/main.jl
+  julia --project=. scripts/opt_qnoisy_3d.jl
 
 To undo the IonSim patch later:
   git -C ~/.julia/dev/IonSim checkout -- src/iontraps.jl
