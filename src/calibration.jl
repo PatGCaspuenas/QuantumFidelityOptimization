@@ -48,18 +48,20 @@ function build_chamber(; B=6e-4,
     laser1 = Laser(pointing=[(1, 1.), (2, 1.)])
     laser2 = Laser(pointing=[(1, 1.), (2, 1.)])
 
-    chain = LinearChain(
-        ions=[ca, ca],
-        comfrequencies=comfreq,
-        selectedmodes=selected,
-    )
-
-    chamber = Chamber(
-        iontrap=chain,
-        B=B,
-        Bhat=(x̂ + ẑ) / √2,
-        lasers=[laser1, laser2],
-    )
+    chain, chamber = Logging.with_logger(Logging.NullLogger()) do
+        ch = LinearChain(
+            ions=[ca, ca],
+            comfrequencies=comfreq,
+            selectedmodes=selected,
+        )
+        cb = Chamber(
+            iontrap=ch,
+            B=B,
+            Bhat=(x̂ + ẑ) / √2,
+            lasers=[laser1, laser2],
+        )
+        ch, cb
+    end
 
     mode = zmodes(chamber)[1]
     return (ca=ca, laser1=laser1, laser2=laser2, chamber=chamber, mode=mode)
@@ -157,17 +159,7 @@ Requires `StatsBase` and `LsqFit`. This method attempts to load them at call-tim
 and throws an informative error if unavailable.
 """
 function Q_noisy(t, f_cl, f_sb, A; N::Int=100, phase_grid=0:0.1:π, dt=0.1)
-    # Call-time optional deps (cleaner than file-scope try/catch)
-    local StatsBase, LsqFit
-    try
-        @eval begin
-            import StatsBase
-            import LsqFit
-        end
-    catch
-        throw(ArgumentError("Q_noisy requires StatsBase and LsqFit. Add them to the environment to use this method."))
-    end
-
+    # StatsBase and LsqFit are imported at module level in CalibrationCode.jl
     setup = build_chamber()
     configure_lasers!(setup, f_cl, f_sb, A)
 

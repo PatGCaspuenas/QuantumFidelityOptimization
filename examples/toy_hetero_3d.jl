@@ -1,6 +1,10 @@
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+
 using Random
 using Distributions
-using CalibrationCode
+using .CalibrationCode
 
 function main(; seed=3)
     rng = MersenneTwister(seed)
@@ -35,6 +39,6 @@ function main(; seed=3)
     end
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
+if !isinteractive()
     main()
 end

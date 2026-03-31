@@ -82,18 +82,7 @@ calibration_code/
 
 ## Installation
 
-This repository is a Julia project.
-
-1. Install Julia (recommended: Julia ≥ 1.9).
-2. From the repository root, start Julia and instantiate:
-
-```julia
-import Pkg
-Pkg.activate(".")
-Pkg.instantiate()
-```
-
-If you need platform-specific notes (especially for `IonSim`/`QuantumOptics` dependencies), follow your local installation notes or the repository instructions if you maintain a separate installation guide.
+Please follow installation.md
 
 ---
 
