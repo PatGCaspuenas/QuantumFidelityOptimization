@@ -7,11 +7,7 @@ using Statistics
 using LinearAlgebra
 using Logging
 
-# Physics packages (needed by calibration.jl and Q_noisy/Q_det)
-using IonSim
-using QuantumOptics
-using StatsBase
-using LsqFit
+using IonSim, QuantumOptics, StatsBase, LsqFit
 const pc = IonSim.PhysicalConstants
 
 # --- Physics / estimators (IonSim + QuantumOptics live in calibration.jl) ---
@@ -20,7 +16,7 @@ include("coordinate_search.jl")
 
 # --- Bayesian optimization variants ---
 include("bayes_opt.jl")             # homoscedastic GP + EI
-include("bayes_hetero_opt.jl")      # heteroscedastic GP + UCB + σ-threshold
+include("bayes_hetero_opt.jl")  # heteroscedastic GP + UCB + σ-threshold
 include("bayes_cokrig_opt.jl")      # 2-fidelity AR(1) co-kriging
 include("bayes_MF_opt.jl")          # N-fidelity augmented-input GP (z-levels)
 
@@ -32,8 +28,7 @@ include("bayes_MF_opt.jl")          # N-fidelity augmented-input GP (z-levels)
 # -------------------------------
 
 # Estimators / calibration
-export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy
-export coordinate_search, trial
+export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy, Q_varMS
 
 # Homoscedastic BO
 export BOResult, bayesopt
