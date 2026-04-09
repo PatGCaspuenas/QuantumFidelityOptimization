@@ -392,6 +392,120 @@ function recommend_mean(gp::HeteroGP, bounds; M::Int=20000, rng::Random.Abstract
 end
 
 # -------------------------
+# Variable-N helpers
+# -------------------------
+
+# Option 1: select largest σ ≤ α·√s2 from σ_levels; fallback to minimum(σ_levels).
+function choose_sigma_threshold(s2::Float64, σ_levels::Vector{Float64}; α::Float64=0.5)
+    isempty(σ_levels) && throw(ArgumentError("σ_levels must be non-empty"))
+    thresh = α * sqrt(max(s2, 0.0))
+    best = nothing
+    for σ in σ_levels
+        if σ ≤ thresh
+            best = (best === nothing || σ > best) ? σ : best
+        end
+    end
+    return best === nothing ? minimum(σ_levels) : best
+end
+
+# Convert σ_level → N_shots via N = 1/σ².
+_sigma_to_n(σ::Float64, n_floor::Int, n_max::Int) =
+    clamp(round(Int, 1.0 / σ^2), n_floor, n_max)
+
+# Option 2: N from GP posterior mean targeting fixed relative precision in (1−Q).
+# Formula: N = 1 / (c² · (1−Q_est)), blows up as Q→1 (capped at n_max).
+function _n_from_mean(μ::Float64, use_log_fidelity::Bool,
+                      n_floor::Int, n_max::Int, c::Float64)::Int
+    Q_est = use_log_fidelity ? clamp(10.0^μ, 0.0, 1.0) : clamp(μ, 0.0, 1.0)
+    one_minus_Q = max(1.0 - Q_est, 1e-8)
+    return clamp(round(Int, 1.0 / (c^2 * one_minus_Q)), n_floor, n_max)
+end
+
+# Options 3 (:ci) and 4 (:verify) adaptive measurement.
+# Starts with n_floor shots, adds batches until a stopping condition is met or n_max.
+# Returns (y_out, σy_out, N_total_used, stop_loop).
+#
+# :ci    — stop_loop=true when CI lower bound exceeds threshold (confident above → stop BO).
+#          Also exits early when CI upper bound drops below threshold (confident below).
+# :verify — only triggered when initial Q > threshold.
+#          Adds shots until Q falls below threshold (was noise) or n_max reached.
+#          stop_loop=true when n_max reached with Q still above threshold (confirmed above).
+function _adaptive_measure(f, x::Vector{Float64},
+                           n_floor::Int, n_max::Int,
+                           threshold_gp::Float64,
+                           z::Float64,
+                           mode::Symbol,
+                           maximize::Bool,
+                           use_log_fidelity::Bool,
+                           sigma_mode::Symbol,
+                           batch_size::Int=50)
+    y1, _ = _call_f_raw(f, x, n_floor)
+    Q_cur   = use_log_fidelity ? clamp(10.0^y1, 0.0, 1.0) : clamp(y1, 0.0, 1.0)
+    k_total = Q_cur * Float64(n_floor)
+    N_total = n_floor
+    stop_loop = false
+
+    # For :verify only activate if initial measurement is above threshold
+    if mode === :verify
+        y_init = use_log_fidelity ? log10(max(Q_cur, 1e-15)) : Q_cur
+        at_or_above = maximize ? (y_init >= threshold_gp) : (y_init <= threshold_gp)
+        if !at_or_above
+            # Below threshold from the start — no extra shots needed
+            σ_Q_f   = sqrt(max(Q_cur * (1.0 - Q_cur), 0.0) / N_total)
+            σy_f    = sigma_mode === :binomial ?
+                      (use_log_fidelity ? σ_Q_f / (max(Q_cur, 1e-15) * log(10)) : σ_Q_f) :
+                      1.0 / sqrt(Float64(N_total))
+            return y_init, σy_f, N_total, false
+        end
+    end
+
+    while N_total < n_max
+        Q_cur  = k_total / Float64(N_total)
+        σ_Q    = sqrt(max(Q_cur * (1.0 - Q_cur), 0.0) / Float64(N_total))
+        σy_cur = sigma_mode === :binomial ?
+                 (use_log_fidelity ? σ_Q / (max(Q_cur, 1e-15) * log(10)) : σ_Q) :
+                 1.0 / sqrt(Float64(N_total))
+        y_cur  = use_log_fidelity ? log10(max(Q_cur, 1e-15)) : Q_cur
+
+        above_ci = maximize ? (y_cur - z*σy_cur > threshold_gp) :
+                               (y_cur + z*σy_cur < threshold_gp)
+        below_ci = maximize ? (y_cur + z*σy_cur < threshold_gp) :
+                               (y_cur - z*σy_cur > threshold_gp)
+
+        if mode === :ci && above_ci
+            stop_loop = true; break
+        end
+        below_ci && break
+
+        if mode === :verify
+            fell_below = maximize ? (y_cur < threshold_gp) : (y_cur > threshold_gp)
+            fell_below && break
+        end
+
+        Δ     = min(batch_size, n_max - N_total)
+        y_new, _ = _call_f_raw(f, x, Δ)
+        Q_new = use_log_fidelity ? clamp(10.0^y_new, 0.0, 1.0) : clamp(y_new, 0.0, 1.0)
+        k_total += Q_new * Float64(Δ)
+        N_total += Δ
+    end
+
+    if mode === :verify && N_total >= n_max
+        Q_cur = k_total / Float64(N_total)
+        y_cur = use_log_fidelity ? log10(max(Q_cur, 1e-15)) : Q_cur
+        stop_loop = maximize ? (y_cur >= threshold_gp) : (y_cur <= threshold_gp)
+    end
+
+    Q_final  = k_total / Float64(N_total)
+    σ_Q_f    = sqrt(max(Q_final * (1.0 - Q_final), 0.0) / Float64(N_total))
+    σy_final = sigma_mode === :binomial ?
+               (use_log_fidelity ? σ_Q_f / (max(Q_final, 1e-15) * log(10)) : σ_Q_f) :
+               1.0 / sqrt(Float64(N_total))
+    y_final  = use_log_fidelity ? log10(max(Q_final, 1e-15)) : Q_final
+
+    return y_final, σy_final, N_total, stop_loop
+end
+
+# -------------------------
 # Main algorithm
 # -------------------------
 
@@ -430,7 +544,20 @@ function bayesopt_ucb_threshold(f;
                                init_sampling::Symbol=:random,
                                acq_sampling::Symbol=:random,
                                fixed_init_seed::Union{Nothing,Int}=nothing,
-                               n_restarts::Int=6)
+                               fixed_acq_seed::Union{Nothing,Int}=nothing,
+                               fixed_rec_seed::Union{Nothing,Int}=nothing,
+                               learn_noise_scale::Bool=true,
+                               n_restarts::Int=6,
+                               variable_n_mode::Symbol=:none,
+                               n_floor::Int=50,
+                               n_max_shots::Int=2000,
+                               sigma_levels::Vector{Float64}=Float64[],
+                               alpha_s2::Float64=0.5,
+                               n_precision::Float64=0.05,
+                               ci_z::Float64=1.96,
+                               fidelity_threshold_vn::Union{Nothing,Float64}=nothing,
+                               acq_n_mode::Symbol=:floor,
+                               use_log_fidelity::Bool=false)
 
     _validate_bounds(bounds)
     n_init ≥ 1 || throw(ArgumentError("n_init must be ≥ 1"))
@@ -444,8 +571,20 @@ function bayesopt_ucb_threshold(f;
     n_shots ≥ 1   || throw(ArgumentError("n_shots must be ≥ 1"))
     sigma_mode ∈ (:simple, :binomial) || throw(ArgumentError("sigma_mode must be :simple or :binomial"))
     n_checks ∈ (1, 2) || throw(ArgumentError("n_checks must be 1 or 2"))
+    variable_n_mode ∈ (:none, :s2, :mean, :ci, :verify) || throw(ArgumentError("variable_n_mode must be :none, :s2, :mean, :ci, or :verify"))
+    acq_n_mode ∈ (:floor, :mean) || throw(ArgumentError("acq_n_mode must be :floor or :mean"))
+    n_floor ≥ 1 || throw(ArgumentError("n_floor must be ≥ 1"))
+    n_max_shots ≥ n_floor || throw(ArgumentError("n_max_shots must be ≥ n_floor"))
+    (variable_n_mode ∈ (:ci, :verify) && fidelity_threshold_vn === nothing) &&
+        throw(ArgumentError("fidelity_threshold_vn required for variable_n_mode :ci or :verify"))
+    (variable_n_mode === :s2 && isempty(sigma_levels)) &&
+        throw(ArgumentError("sigma_levels must be non-empty for variable_n_mode :s2"))
 
     rng_local = seed === nothing ? rng : MersenneTwister(seed)
+    # Separate RNGs for acq sampling and recommend_mean: when fixed seeds are provided,
+    # all runs use the same random candidates at each iteration, isolating that variability source.
+    rng_acq = fixed_acq_seed === nothing ? rng_local : MersenneTwister(fixed_acq_seed)
+    rng_rec = fixed_rec_seed === nothing ? rng_local : MersenneTwister(fixed_rec_seed)
 
     lb = Float64[b[1] for b in bounds]
     ub = Float64[b[2] for b in bounds]
@@ -495,7 +634,7 @@ function bayesopt_ucb_threshold(f;
             gp = fit_heterogp(X[:, 1:write_idx], y[1:write_idx], σy[1:write_idx];
                               θ_init=pretrained_θ,
                               learn_hypers=false,
-                              learn_noise_scale=true,
+                              learn_noise_scale=learn_noise_scale,
                               jitter=1e-8,
                               rng=rng_local)
         elseif freeze_mode == :all_from && it > n_freeze_iters && frozen_θ_from !== nothing
@@ -520,7 +659,7 @@ function bayesopt_ucb_threshold(f;
                               θ_init=θ_prev,
                               fixed_ℓ=current_fixed_ℓ,
                               learn_hypers=do_opt,
-                              learn_noise_scale=true,
+                              learn_noise_scale=learn_noise_scale,
                               n_restarts=do_opt ? n_restarts : 0,
                               jitter=1e-8,
                               rng=rng_local)
@@ -535,27 +674,42 @@ function bayesopt_ucb_threshold(f;
         θ_prev = gp.θ
 
         acq_pts = acq_sampling === :sobol ?
-            _sobol_in_box(rng_local, lb, ub, M_acq) :
+            _sobol_in_box(rng_acq, lb, ub, M_acq) :
             nothing
 
-        best_x = acq_sampling === :sobol ? acq_pts[:, 1] : _rand_in_box(rng_local, lb, ub)
-        best_a = -Inf
+        best_x  = acq_sampling === :sobol ? acq_pts[:, 1] : _rand_in_box(rng_acq, lb, ub)
+        best_a  = -Inf
         best_s2 = 0.0
+        best_mu = 0.0
 
         for i in 1:M_acq
-            x = acq_sampling === :sobol ? acq_pts[:, i] : _rand_in_box(rng_local, lb, ub)
+            x = acq_sampling === :sobol ? acq_pts[:, i] : _rand_in_box(rng_acq, lb, ub)
             μ, s2 = predict_latent(gp, x)
             a = ucb_score(μ, s2, κ)
             if a > best_a
-                best_a = a
-                best_x = x
+                best_a  = a
+                best_x  = x
                 best_s2 = s2
+                best_mu = μ
             end
         end
 
+        # Determine N for acquisition point based on variable_n_mode
+        n_acq = if variable_n_mode === :none
+            n_shots
+        elseif variable_n_mode === :s2
+            _sigma_to_n(choose_sigma_threshold(best_s2, sigma_levels; α=alpha_s2), n_floor, n_max_shots)
+        elseif variable_n_mode === :mean
+            _n_from_mean(best_mu, use_log_fidelity, n_floor, n_max_shots, n_precision)
+        elseif acq_n_mode === :mean
+            _n_from_mean(best_mu, use_log_fidelity, n_floor, n_max_shots, n_precision)
+        else
+            n_floor
+        end
+
         # Store acquisition point (always evaluate; add to data only if not a near-duplicate)
-        y_raw, σy_i = _call_f_raw(f, best_x, n_shots)
-        total_shots_count += n_shots
+        y_raw, σy_i = _call_f_raw(f, best_x, n_acq)
+        total_shots_count += n_acq
         if _is_far_enough(best_x, X, write_idx)
             write_idx += 1
             X[:, write_idx] = best_x
@@ -568,50 +722,105 @@ function bayesopt_ucb_threshold(f;
             @info "it=$it best_acq=$best_a"
         end
 
-        # x_rec check: evaluate the GP-recommended point every iteration when early stopping
-        # is configured. The GP benefits from knowing the true value at its current best guess.
-        # Stopping decision is gated on min_iter; data collection (if add_check_points) is not.
-        if fidelity_threshold !== nothing
-            x_rec_es, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+        # x_rec: variable-N evaluation. For :none, x_rec is evaluated inside the threshold
+        # check below. For :ci/:verify, _adaptive_measure may trigger an early return here.
+        y_rec_cur = 0.0
+        σy_rec_cur = 0.0
+        stop_loop = false
+        if variable_n_mode !== :none
+            x_rec_cur, μ_rec, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_rec)
 
-            # Stage 1 — always evaluated
-            y1_raw, σy1_i = _call_f_raw(f, x_rec_es, n_shots)
-            total_shots_count += n_shots
-            if add_check_points && _is_far_enough(x_rec_es, X, write_idx)
+            if variable_n_mode === :s2
+                _, s2_rec = predict_latent(gp, x_rec_cur)
+                n_rec = _sigma_to_n(choose_sigma_threshold(s2_rec, sigma_levels; α=alpha_s2), n_floor, n_max_shots)
+                y_rec_cur, σy_rec_cur = _call_f_raw(f, x_rec_cur, n_rec)
+                total_shots_count += n_rec
+            elseif variable_n_mode === :mean
+                n_rec = _n_from_mean(μ_rec, use_log_fidelity, n_floor, n_max_shots, n_precision)
+                y_rec_cur, σy_rec_cur = _call_f_raw(f, x_rec_cur, n_rec)
+                total_shots_count += n_rec
+            else  # :ci or :verify
+                y_rec_cur, σy_rec_cur, n_rec, stop_loop = _adaptive_measure(
+                    f, x_rec_cur, n_floor, n_max_shots,
+                    fidelity_threshold_vn, ci_z, variable_n_mode,
+                    maximize, use_log_fidelity, sigma_mode)
+                total_shots_count += n_rec
+            end
+
+            if _is_far_enough(x_rec_cur, X, write_idx)
                 write_idx += 1
-                X[:, write_idx] = x_rec_es
-                y[write_idx]  = maximize ? y1_raw : -y1_raw
-                σy[write_idx] = σy1_i
+                X[:, write_idx] = x_rec_cur
+                y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
+                σy[write_idx] = σy_rec_cur
+            end
+
+            # :ci early-stops only via _adaptive_measure above; return if triggered and min_iter met.
+            if stop_loop && it >= min_iter
+                n_iter_actual = it
+                y_last_out = maximize ? y_last_val : -y_last_val
+                y_out = maximize ? y[1:write_idx] : -y[1:write_idx]
+                return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
+                                      bounds, n_shots, n_init, n_iter, maximize,
+                                      x_rec_cur, y_rec_cur, n_iter_actual, y_last_out,
+                                      gp.ℓ, gp.σf, gp.c, total_shots_count)
+            end
+        end
+
+        # Threshold check — runs for :none, :s2, and :mean modes only.
+        # :ci and :verify handle their own stopping inside _adaptive_measure above.
+        # For :none: x_rec is evaluated here with n_shots (stage 1), with add_check_points guard.
+        # For :s2/:mean: reuses y_rec_cur from the evaluation above as stage 1.
+        if fidelity_threshold !== nothing && variable_n_mode ∈ (:none, :s2, :mean)
+            if variable_n_mode === :none
+                x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_rec)
+                y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
+                total_shots_count += n_shots
+                if add_check_points && _is_far_enough(x_rec_cur, X, write_idx)
+                    write_idx += 1
+                    X[:, write_idx] = x_rec_cur
+                    y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
+                    σy[write_idx] = σy1_i
+                end
             end
 
             if it >= min_iter
-                y1 = maximize ? y1_raw : -y1_raw
+                y1 = maximize ? y_rec_cur : -y_rec_cur
                 reached1 = maximize ? (y1 >= fidelity_threshold) : (y1 <= fidelity_threshold)
 
                 if reached1
+                    # Stage 2 N: same variable-N logic for :s2/:mean; n_shots for :none.
+                    n_check2 = if variable_n_mode === :s2
+                        _, s2_c = predict_latent(gp, x_rec_cur)
+                        _sigma_to_n(choose_sigma_threshold(s2_c, sigma_levels; α=alpha_s2), n_floor, n_max_shots)
+                    elseif variable_n_mode === :mean
+                        _n_from_mean(μ_rec, use_log_fidelity, n_floor, n_max_shots, n_precision)
+                    else  # :none
+                        n_shots
+                    end
+
                     if n_checks == 1
-                        # Single-check stopping: stage 1 alone is sufficient
                         n_iter_actual = it
                         y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
+                        y_last_es = variable_n_mode === :none ? y_rec_cur :
+                                    (maximize ? y_last_val : -y_last_val)
                         return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
                                               bounds, n_shots, n_init, n_iter, maximize,
-                                              x_rec_es, y1_raw, n_iter_actual, y1_raw,
+                                              x_rec_cur, y_rec_cur, n_iter_actual, y_last_es,
                                               gp.ℓ, gp.σf, gp.c, total_shots_count)
                     else
-                        # Stage 2 — only when stage 1 passes; not added to data (same x)
-                        y2_raw, _ = _call_f_raw(f, x_rec_es, n_shots)
-                        total_shots_count += n_shots
-
+                        y2_raw, _ = _call_f_raw(f, x_rec_cur, n_check2)
+                        total_shots_count += n_check2
                         y2 = maximize ? y2_raw : -y2_raw
                         reached2 = maximize ? (y2 >= fidelity_threshold) : (y2 <= fidelity_threshold)
-
                         if reached2
                             n_iter_actual = it
-                            y_rec_es = (y1_raw + y2_raw) / 2
+                            y_rec_avg = (y_rec_cur + y2_raw) / 2
                             y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
+                            y_last_es = variable_n_mode === :none ? y_rec_avg :
+                                        (maximize ? y_last_val : -y_last_val)
                             return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
                                                   bounds, n_shots, n_init, n_iter, maximize,
-                                                  x_rec_es, y_rec_es, n_iter_actual, y_rec_es,
+                                                  x_rec_cur, y_rec_avg, n_iter_actual, y_last_es,
                                                   gp.ℓ, gp.σf, gp.c, total_shots_count)
                         end
                     end
@@ -640,12 +849,12 @@ function bayesopt_ucb_threshold(f;
                       θ_init=final_θ_init,
                       fixed_ℓ=final_fixed_ℓ,
                       learn_hypers=!freeze_all_final,
-                      learn_noise_scale=!freeze_all_final,
+                      learn_noise_scale=learn_noise_scale && !freeze_all_final,
                       n_restarts=freeze_all_final ? 0 : n_restarts + 2,
                       jitter=1e-8,
                       rng=rng_local)
 
-    x_rec, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+    x_rec, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_rec)
     y_rec_raw, _ = _call_f_raw(f, x_rec, n_shots)
     total_shots_count += n_shots
 
