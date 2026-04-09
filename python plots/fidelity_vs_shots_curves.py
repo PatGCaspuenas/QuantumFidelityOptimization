@@ -196,16 +196,22 @@ def plot_versions(n_pairs, output_file=None, max_iterations=120):
         N        - shot count label (int)
         old_file - path to old-version benchmark file (optional)
         new_file - path to new-version benchmark file (optional)
+        var      - if True, treat as a variable-N pair: drawn in black with
+                   diamond markers (old=hollow 'D', new=filled 'D')
     Color encodes N; marker encodes version (circle=old, triangle=new).
+    var pairs are always black with diamond markers and sit on top (zorder=10).
     Faint individual points + mean±std summary markers.
     N legend below the plot.
     """
-    N_vals    = [p['N'] for p in n_pairs]
+    fixed_pairs = [p for p in n_pairs if not p.get('var')]
+    N_vals    = [p['N'] for p in fixed_pairs]
     palette   = sns.color_palette("husl", len(N_vals))
     color_map = dict(zip(N_vals, palette))
 
     marker_old = 'o'
     marker_new = '^'
+    marker_var_old = 'o'   # hollow diamond  (mfc='none')
+    marker_var_new = '^'   # filled diamond
 
     fig, ax = plt.subplots(1, 1, figsize=(6, 5), subplot_kw={'box_aspect': 1},
                            layout='constrained')
@@ -214,11 +220,14 @@ def plot_versions(n_pairs, output_file=None, max_iterations=120):
     x_range_per_N = {}  # N -> [xmin, xmax] across both versions
 
     for pair in n_pairs:
-        N   = pair['N']
-        col = color_map[N]
+        is_var = pair.get('var', False)
+        col    = 'black' if is_var else color_map[pair['N']]
 
-        for filepath, marker in [(pair.get('old_file'), marker_old),
-                                  (pair.get('new_file'), marker_new)]:
+        entries = []
+        entries = [(pair.get('old_file'), marker_old, False),
+                       (pair.get('new_file'), marker_new, False)]
+
+        for filepath, marker, hollow in entries:
             if filepath is None:
                 continue
 
@@ -230,17 +239,25 @@ def plot_versions(n_pairs, output_file=None, max_iterations=120):
             all_x.extend(log_shots)
             all_y.extend(infidelity)
 
-            xlo, xhi = log_shots.min(), log_shots.max()
-            if N not in x_range_per_N:
-                x_range_per_N[N] = [xlo, xhi]
-            else:
-                x_range_per_N[N][0] = min(x_range_per_N[N][0], xlo)
-                x_range_per_N[N][1] = max(x_range_per_N[N][1], xhi)
+            if not is_var:
+                N = pair['N']
+                xlo, xhi = log_shots.min(), log_shots.max()
+                if N not in x_range_per_N:
+                    x_range_per_N[N] = [xlo, xhi]
+                else:
+                    x_range_per_N[N][0] = min(x_range_per_N[N][0], xlo)
+                    x_range_per_N[N][1] = max(x_range_per_N[N][1], xhi)
+
+            mfc   = 'none' if hollow else col
+            zbase = 2
+            msize = 7
+            ew    =  1.5
 
             # Faint individual trial points
             ax.scatter(log_shots, infidelity,
-                       color=col, alpha=0.15, s=18, linewidths=0,
-                       marker=marker, zorder=2, clip_on=True)
+                       color=col, alpha=0.15,
+                       s=18, linewidths=0,
+                       marker=marker, zorder=zbase, clip_on=True)
 
             # Mean ± std summary marker
             mx = np.mean(log_shots)
@@ -251,10 +268,11 @@ def plot_versions(n_pairs, output_file=None, max_iterations=120):
             ax.errorbar(mx, my,
                         xerr=[[min(sx, mx)], [sx]],
                         yerr=[[min(sy, my * 0.9999)], [min(sy, max(1.0 - my, 0.0))]],
-                        fmt=marker, color=col, markersize=7,
-                        markeredgecolor=col, markeredgewidth=1.5,
-                        capsize=3, elinewidth=1.2,
-                        zorder=5, clip_on=True)
+                        fmt=marker, color=col, markersize=msize,
+                        markerfacecolor=mfc,
+                        markeredgecolor=col, markeredgewidth=ew,
+                        capsize=3, elinewidth=ew,
+                        zorder=zbase + 1, clip_on=True)
 
     if all_x:
         all_x = np.array(all_x)
@@ -292,9 +310,12 @@ def plot_versions(n_pairs, output_file=None, max_iterations=120):
 
     # N legend below the plot (color patches)
     n_handles = [mpatches.Patch(color=color_map[N], label=f'${N}$') for N in N_vals]
-    fig.legend(handles=n_handles, loc='outside lower center', ncol=len(N_vals),
+    if is_var:
+        n_handles.append(mpatches.Patch(color='black', label='Var'))
+    fig.legend(handles=n_handles, loc='outside lower center', ncol=len(N_vals) + 1 if is_var else len(N_vals),
                title='Number of shots $N$',
-               frameon=True, fontsize=12, title_fontsize=12)
+               frameon=True, fontsize=12, title_fontsize=12,
+               handlelength=1.0, handleheight=0.8)
 
     if output_file:
         fig.savefig(output_file, dpi=300, bbox_inches='tight')
@@ -317,20 +338,26 @@ if __name__ == '__main__':
 
     n_pairs = [
         dict(N=50,
-             old_file=data_dir / 'benchmark_results_onelevel_N51_old.txt',
+             old_file=data_dir / 'benchmark_results_onelevel_N50.txt',
              new_file=data_dir / 'benchmark_results_N50_linear_binomial_LFBGS_Ncheck2_add.txt'),
         dict(N=100,
-             old_file=data_dir / 'benchmark_results_onelevel_N100_old.txt',
+             old_file=data_dir / 'benchmark_results_onelevel_N100.txt',
              new_file=data_dir / 'benchmark_results_N100_linear_binomial_LFBGS_Ncheck2_add.txt'),
+        dict(N=250,
+             old_file=data_dir / 'benchmark_results_onelevel_N250.txt',
+             new_file=data_dir / 'benchmark_results_N250_linear_binomial_LFBGS_Ncheck2_add.txt'),
         dict(N=400,
-             old_file=data_dir / 'benchmark_results_onelevel_N400_old.txt',
+             old_file=data_dir / 'benchmark_results_onelevel_N400.txt',
              new_file=data_dir / 'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add.txt'),
         dict(N=2500,
-             old_file=data_dir / 'benchmark_results_onelevel_N2500_old.txt',
+             old_file=data_dir / 'benchmark_results_onelevel_N2500.txt',
              new_file=data_dir / 'benchmark_results_N2500_linear_binomial_LFBGS_Ncheck2_add.txt'),
         dict(N=10000,
-             old_file=data_dir / 'benchmark_results_onelevel_N10000_old.txt',
+             old_file=data_dir / 'benchmark_results_onelevel_N10000.txt',
              new_file=data_dir / 'benchmark_results_N10000_linear_binomial_LFBGS_Ncheck2_add.txt'),
+        dict(var=True,
+             old_file=data_dir / 'benchmark_results_fourlevels.txt',
+             new_file=data_dir / 'benchmark_results_varN_verify_floor_binomial.txt'),
     ]
 
     plot_versions(

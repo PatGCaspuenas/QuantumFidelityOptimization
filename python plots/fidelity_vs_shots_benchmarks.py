@@ -200,7 +200,7 @@ def plot_shots_vs_fidelity(files, output_file=None, max_iterations=120, labels=N
                 lx = np.log10(float((n_init_hint + 2 * itr) * n_shots_hint))
             if lx is None and sigma_cols and len(parts) >= sigma_cols[-1] + 1:
                 try:
-                    total_shots = sum(
+                    total_shots = 2 * sum(
                         int(parts[sigma_cols[j]].strip()) * round(1 / sigma_levels[j] ** 2)
                         for j in range(len(sigma_levels))
                     )
@@ -242,7 +242,7 @@ def plot_shots_vs_fidelity(files, output_file=None, max_iterations=120, labels=N
         ax.errorbar(mx, my,
                     xerr=[[min(sx, mx)], [sx]],
                     yerr=[[min(sy, my * 0.9999)], [min(sy, max(1.0 - my, 0.0))]],
-                    fmt='o', color=col, markersize=7, markeredgecolor=col,
+                    fmt='o', color=col, markersize=4, markeredgecolor=col,
                     markeredgewidth=1.5, capsize=3, elinewidth=1.2,
                     label=full_label, zorder=5, clip_on=False)
 
@@ -257,7 +257,7 @@ def plot_shots_vs_fidelity(files, output_file=None, max_iterations=120, labels=N
     ax.set_xlabel('$\\log_{10}$(Total shots)', fontsize=14)
     ax.set_ylabel('$\\log_{10}(1 - \\mathrm{Fidelity})$', fontsize=14)
     ax.set_xlim([3.5,5.5])
-    ax.set_ylim([1e-4, 1e-2])
+    ax.set_ylim([1e-7, 1e1])
     ax.set_title('$N=400$', fontsize=14)
     ax.tick_params(axis='both', direction='in', length=5,
                    top=False, bottom=True, left=True, right=False, labelsize=14)
@@ -286,32 +286,31 @@ if __name__ == '__main__':
     figures_dir.mkdir(exist_ok=True)
 
     # ── Files to compare ──────────────────────────────────────────────────────
-    candidates = [
-        data_dir / 'benchmark_results_onelevel_N400.txt',
-        data_dir / 'benchmark_results_N400_newseeds_comparison.txt',       
+    candidates = [  
         data_dir / 'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add.txt',
-        data_dir / 'benchmark_results_N400_linear_binomial_every1_LFBGS_Ncheck2_add.txt',   
-data_dir / 'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add_restarts20.txt',
-data_dir / 'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add_explore25.txt',
-data_dir / 'benchmark_results_N400_log_binomial_LFBGS_Ncheck2_add.txt',
-       data_dir /  'benchmark_results_N400_linear_simple_LFBGS_Ncheck2_add_bounds.txt',
-        data_dir / 'benchmark_results_N400_linear_simple_m_rec.txt',
-        data_dir / 'benchmark_results_N400_linear_binomial_every1_sobol_LFBGS_Ncheck2_add.txt',
-
-
+        data_dir / 'benchmark_results_N400_v2_freeze_hypers.txt',
+        data_dir / 'benchmark_results_N400_v2_freeze_hypers_fixed_init.txt',
+        data_dir / 'benchmark_results_N400_v2_freeze_hypers_n50init.txt',
+        data_dir / 'benchmark_results_N400_v2_n50init.txt',
     ]
     files = [f for f in candidates if f.is_file()]
 
     # ── Human-readable labels (keyed by basename) ─────────────────────────────
     labels = {
         'benchmark_results_onelevel_N400_old.txt':                                           'v0 (old)',
-        'benchmark_results_onelevel_N400.txt':                                                'v0',
+        'benchmark_results_onelevel_N400.txt':                                                'v0 ($N=400$)',
         'benchmark_results_N400_newseeds_comparison.txt':                                     'v1',
         'benchmark_results_N400_linear_simple_LFBGS.txt':                                    'v1 LFBGS, 1 check, no add',
         'benchmark_results_N400_linear_simple_LFBGS_Ncheck2.txt':                            'v1 LFBGS, 2 checks, no add',
         'benchmark_results_N400_linear_simple_LFBGS_Ncheck2_add.txt':                        'v1 LFBGS, 2 checks, add',
         'benchmark_results_N400_linear_simple_LFBGS_add.txt':                                'v1 LFBGS, 1 check, add',
         'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add.txt':                      'v2',
+        'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add_EI.txt':                   'v2 EI',
+        'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add_TS.txt':                    'v2 TS',
+        'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add_BOrestart.txt':            'v2 BO restart',
+        'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add_BOexplorationreset.txt':    'v2 BO expl reset',
+        'benchmark_results_N400_linear_binomial_LFBGS_add_fixed40.txt':                      'v2 $n_{iter}=40$',
+        'benchmark_results_N400_linear_binomial_LFBGS_xrec.txt':                             'v2 xrec',
         'benchmark_results_N400_linear_binomial_every1_sobol_LFBGS_Ncheck2_add.txt':                 'v2 sobol',
         'benchmark_results_N400_log_binomial_LFBGS_Ncheck2_add.txt':                         'v2 log',
         'benchmark_results_N400_linear_binomial_every1_LFBGS_Ncheck2_add.txt':            'v2 every 1',
@@ -326,7 +325,35 @@ data_dir / 'benchmark_results_N400_log_binomial_LFBGS_Ncheck2_add.txt',
         'benchmark_results_N400_linear_binomial_every1_LFBGS_Ncheck2_add_nfreeze20.txt':     'v2 $n_{freeze}=20$ ($l$)',
         'benchmark_results_N400_linear_binomial_every1_LFBGS_Ncheck2_add_pretrain_all.txt':  'v2 pretrain (all)',
         'benchmark_results_N400_linear_binomial_every1_LFBGS_Ncheck2_add_pretrain.txt':      'v2 pretrain ($l$)',
-
+        'benchmark_results_N400_1_baseline.txt' :  'v2 fixed 100',
+        'benchmark_results_N400_2_fixed_init.txt' :  'v2 fixed init',
+        'benchmark_results_N400_3_fixed_init_acq.txt' :  'v2 fixed init+acq',
+        'benchmark_results_N400_4_fixed_init_acq_rec.txt' :  'v2 fixed init+acq+rec',
+        'benchmark_results_N400_2_fixed_init_goodseed.txt' :  'v2 fixed init (good)',
+        'benchmark_results_N400_3_fixed_init_acq_goodseed.txt' :  'v2 fixed init+acq (good)',
+        'benchmark_results_N400_4_fixed_init_acq_rec_goodseed.txt' :  'v2 fixed init+acq+rec (good)',
+        'benchmark_results_variso_det_1_baseline.txt' :  'v2 fixed 100',
+        'benchmark_results_variso_det_2_fixed_init.txt' :  'v2 fixed init',
+        'benchmark_results_variso_det_3_fixed_init_acq.txt' :  'v2 fixed init+acq',
+        'benchmark_results_variso_det_4_fixed_all.txt' :  'v2 fixed 4',
+        'benchmark_results_variso_det_5_fixed_acq.txt' :  'v2 fixed acq',
+        'benchmark_results_variso_det_6_fixed_rec.txt' :  'v2 fixed rec',
+        'benchmark_results_variso_det_7_freeze_hypers.txt' : 'v2 freeze hyper',
+        'benchmark_results_varN_ci_floor_binomial.txt':  'v2 ci floor',
+        'benchmark_results_varN_ci_mean_binomial.txt':  'v2 ci mean',
+        'benchmark_results_varN_mean_binomial.txt':  'v2 mean',
+        'benchmark_results_varN_s2_binomial.txt':  'v2 s2',
+        'benchmark_results_varN_verify_floor_binomial.txt':  'v2 verify floor',
+        'benchmark_results_varN_verify_mean_binomial.txt':  'v2 verify mean',
+        'benchmark_results_varN_mean_simple.txt':  'v2 mean (simple)',
+        'benchmark_results_varN_s2_simple.txt':  'v2 s2 (simple)',
+        'benchmark_results_fourlevels.txt':  'v0 ',
+        'benchmark_results_N400_v2_freeze_hypers.txt':  'v2 freeze hypers',
+        'benchmark_results_N400_v2_freeze_hypers_fixed_init.txt':  'v2 freeze hypers+init',
+        'benchmark_results_N400_v2_freeze_hypers_n50init.txt':  'v2 freeze hypers+$n_{init}=50$',
+        'benchmark_results_N400_v2_n50init.txt':  'v2 $n_{init}=50$',
+        'benchmark_results_N400_v2_kappa0.txt': 'v2 $\\kappa=0$',
+        'benchmark_results_N400_v2_yrec_LCB_miniter20.txt': 'v2 yrec LCB miniter 20',
     }
     # ─────────────────────────────────────────────────────────────────────────
 
