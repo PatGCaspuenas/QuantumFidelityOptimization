@@ -36,7 +36,6 @@ export BOResult, bayesopt
 # Heteroscedastic BO
 export HeteroGP, HeteroBOResult
 export fit_heterogp, predict_latent
-export choose_sigma_threshold, count_noise_levels
 export bayesopt_ucb_threshold
 
 # 2-fidelity co-kriging BO

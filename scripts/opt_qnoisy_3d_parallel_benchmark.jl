@@ -20,34 +20,25 @@ try
         using Random
     end
 
-    # ============================================================
-    # CONFIG — edit these flags to change behaviour.
-    # Any value can be overridden at runtime via ENV variables
-    # (used by run_benchmark_sweep.jl). ENV keys listed in comments.
-    # ============================================================
-    use_log_fidelity     = get(ENV, "BO_LOG_FID",      "false") == "true"   # BO_LOG_FID=true/false
-    optimize_det         = get(ENV, "BO_OPT_DET",      "false") == "true"   # BO_OPT_DET=true/false
-    N_shots              = parse(Int,   get(ENV, "BO_N_SHOTS",    "400"))    # BO_N_SHOTS=400
-    sigma_mode           = Symbol(      get(ENV, "BO_SIGMA_MODE", "simple")) # BO_SIGMA_MODE=simple/binomial
-    use_pretrained       = get(ENV, "BO_USE_PRETRAIN",  "false") == "true"  # BO_USE_PRETRAIN=true/false
-    pretrain_file_name   =              get(ENV, "BO_PRETRAIN_FILE", "pretrained_theta_3d.jl") # BO_PRETRAIN_FILE=filename
-    freeze_mode_str      =              get(ENV, "BO_FREEZE_MODE", "none")  # BO_FREEZE_MODE=none/lengthscales/lengthscales_from/all
-    n_freeze_iters       = parse(Int,   get(ENV, "BO_N_FREEZE",   "20"))    # BO_N_FREEZE=20
-    n_initial_samples    = parse(Int,   get(ENV, "BO_N_INIT",     "12"))    # BO_N_INIT=12
-    hyper_every          = parse(Int,   get(ENV, "BO_HYPER_EVERY","10"))    # BO_HYPER_EVERY=10
-    num_sims             = parse(Int,   get(ENV, "BO_NUM_SIMS",   "40"))    # BO_NUM_SIMS=40
-    output_file_name     =              get(ENV, "BO_OUTPUT_FILE", "benchmark_results_N400.txt") # BO_OUTPUT_FILE=...
-    # Sampling strategies: :random or :sobol (Sobol + Owen scramble)
-    #   init_sampling → how to draw the n_init design points
-    #   acq_sampling  → how to draw the M_acq acquisition candidates each iteration
-    init_sampling        = Symbol(      get(ENV, "BO_INIT_SAMPLING", "random")) # BO_INIT_SAMPLING=random/sobol
-    acq_sampling         = Symbol(      get(ENV, "BO_ACQ_SAMPLING",  "random")) # BO_ACQ_SAMPLING=random/sobol
+    # true  → optimize Q_det (deterministic, no shots); false → optimize Q_varMS (noisy)
+    optimize_det     = get(ENV, "BO_OPT_DET",   "false") == "true"   # BO_OPT_DET=true/false
+    # Number of shots per acquisition call (ignored for acq in :variable mode, which uses n_floor)
+    N_shots          = parse(Int, get(ENV, "BO_N_SHOTS",    "400"))   # BO_N_SHOTS=400
+    # Number of initial design points
+    n_initial_samples = parse(Int, get(ENV, "BO_N_INIT",   "12"))    # BO_N_INIT=12
+    # How often to re-fit GP hyperparameters (every N iterations)
+    hyper_every      = parse(Int, get(ENV, "BO_HYPER_EVERY","10"))    # BO_HYPER_EVERY=10
+    # Number of parallel simulations
+    num_sims         = parse(Int, get(ENV, "BO_NUM_SIMS",  "3"))     # BO_NUM_SIMS=40
+
+    # Output file (written to data/)
+    output_file_name =           get(ENV, "BO_OUTPUT_FILE", "benchmark_results.txt") # BO_OUTPUT_FILE=...
 
     # Early-stopping threshold in Q-space.
     #   "0.998"  → fixed value
     #   "auto"   → derive from N_shots as 1 − 1/N
-    #   ""       → no threshold (fixed iterations)
-    _thresh_env          =              get(ENV, "BO_THRESH_Q",   "")       # BO_THRESH_Q=0.998/"auto"/""
+    #   ""       → no threshold (run fixed iterations)
+    _thresh_env      =           get(ENV, "BO_THRESH_Q",   "")        # BO_THRESH_Q=0.998/"auto"/""
     fidelity_threshold_Q = if isempty(_thresh_env)
         nothing
     elseif _thresh_env == "auto"
@@ -55,39 +46,20 @@ try
     else
         parse(Float64, _thresh_env)
     end
-    # Minimum iterations before early stopping is allowed (GP needs data to be trustworthy).
-    min_iter             = parse(Int,   get(ENV, "BO_MIN_ITER",          "1"))    # BO_MIN_ITER=1
-    # Number of independent checks before declaring convergence: 1 (single) or 2 (double).
-    n_checks             = parse(Int,   get(ENV, "BO_N_CHECKS",          "1"))    # BO_N_CHECKS=1/2
-    # Whether to add x_rec check evaluations to GP training data (always with distance guard).
-    add_check_points     = get(ENV, "BO_ADD_CHECK_POINTS", "false") == "true"      # BO_ADD_CHECK_POINTS=true/false
-    explore_frac         = parse(Float64, get(ENV, "BO_EXPLORE_FRAC",      "0.15")) # BO_EXPLORE_FRAC=0.15 (fraction of acquisition candidates drawn from exploration distribution instead of surrogate)
-    # Fixed seed for init points: all runs share the same initial design when set.
-    # "" or unset → init points vary with each run's seed (default behavior).
-    _fixed_init_env      =              get(ENV, "BO_FIXED_INIT_SEED", "")        # BO_FIXED_INIT_SEED=1 or ""
-    fixed_init_seed      = isempty(_fixed_init_env) ? nothing : parse(Int, _fixed_init_env)
-    _fixed_acq_env       =              get(ENV, "BO_FIXED_ACQ_SEED",  "")        # BO_FIXED_ACQ_SEED=1 or "" (fixes random candidates for acq maximization across runs)
-    fixed_acq_seed       = isempty(_fixed_acq_env)  ? nothing : parse(Int, _fixed_acq_env)
-    _fixed_rec_env       =              get(ENV, "BO_FIXED_REC_SEED",  "")        # BO_FIXED_REC_SEED=1 or "" (fixes random candidates for GP mean recommendation across runs)
-    fixed_rec_seed       = isempty(_fixed_rec_env)  ? nothing : parse(Int, _fixed_rec_env)
-    n_restarts           = parse(Int,   get(ENV, "BO_N_RESTARTS",       "6"))     # BO_N_RESTARTS=6 (MLE multi-start restarts per hyper fit; final fit uses n_restarts+2)
-    n_iter               = parse(Int,   get(ENV, "BO_N_ITER",         "120"))     # BO_N_ITER=120
 
-    # Variable-N mode. :none = fixed N_shots (default).
-    # :s2     → σ_levels table driven by GP posterior variance (archived approach, reference)
-    # :mean   → N from GP posterior mean targeting fixed relative precision in (1−Q)
-    # :ci     → adaptive shots at x_rec; stop BO when CI lower bound exceeds threshold
-    # :verify → adaptive shots at x_rec; stop BO when confirmed above threshold at N_max
-    # For :ci and :verify, acq point uses either n_floor (floor) or :mean formula (mean).
-    variable_n_mode      = Symbol(get(ENV, "BO_VAR_N_MODE",    "none"))  # BO_VAR_N_MODE=none/s2/mean/ci/verify
-    n_floor              = parse(Int,   get(ENV, "BO_N_FLOOR",    "50"))  # BO_N_FLOOR=50
-    n_max_shots          = parse(Int,   get(ENV, "BO_N_MAX",     "2000")) # BO_N_MAX=2000
-    n_precision          = parse(Float64, get(ENV, "BO_N_PRECISION", "0.05")) # BO_N_PRECISION=0.05 (c in N=1/(c²(1-Q)))
-    acq_n_mode           = Symbol(get(ENV, "BO_ACQ_N_MODE",   "floor"))  # BO_ACQ_N_MODE=floor/mean
-    # sigma_levels for :s2 mode (archived defaults: N≈50,100,278,500)
-    _sigma_levels_str    = get(ENV, "BO_SIGMA_LEVELS", "0.1412,0.1,0.06,0.04472")
-    sigma_levels         = parse.(Float64, split(_sigma_levels_str, ","))  # BO_SIGMA_LEVELS=0.1412,0.1,0.06,0.04472
-    # ============================================================
+    # Maximum BO iterations
+    n_iter           = parse(Int, get(ENV, "BO_N_ITER",   "120"))     # BO_N_ITER=120
+    # MLE multi-start restarts per hyper fit (final fit uses n_restarts+2)
+    n_restarts       = parse(Int, get(ENV, "BO_N_RESTARTS",  "6"))    # BO_N_RESTARTS=6
+
+    # Variable-N mode:
+    #   false → fixed N_shots per acquisition
+    #   true  → variable mode: adaptive shots at x_rec; early stop when confirmed above threshold
+    use_variable_mode  = get(ENV, "BO_VAR_N_MODE", "false") == "true"   # BO_VAR_N_MODE=true/false
+    # Minimum shots for variable mode (also used for acquisition point)
+    n_floor          = parse(Int, get(ENV, "BO_N_FLOOR",  "50"))      # BO_N_FLOOR=50
+    # Maximum shots for :variable mode
+    n_max_shots      = parse(Int, get(ENV, "BO_N_MAX",  "2000"))      # BO_N_MAX=2000
 
     t = 100.0
     base = CalibrationCode.ideal(t)
@@ -105,37 +77,21 @@ try
     @everywhere const span_fcl = $span_fcl
     @everywhere const span_fsb = $span_fsb
     @everywhere const span_A = $span_A
-
-    @everywhere const use_log_fidelity = $use_log_fidelity
     @everywhere const optimize_det = $optimize_det
-    @everywhere const sigma_mode = $(QuoteNode(sigma_mode))
+
     @everywhere u_to_params(u) = (f_cl0 + span_fcl * u[1],
         f_sb0 + span_fsb * u[2],
         A0 + span_A * u[3])
 
-    # log10(Q): maps Q→1 to 0 (bounded above), noise shrinks at optimum — better than log10(1-Q).
-    @everywhere function apply_log_fidelity(Q::Float64)
-        use_log_fidelity ? log10(max(Q, 1e-15)) : Q
-    end
-
-    # Returns σy in GP space for a measurement with Q_raw fidelity using N shots.
-    # :simple   → 1/√N  (worst-case, ignores Q)
-    # :binomial → √(Q(1-Q)/N) in linear space;
-    #             delta-method through y=log10(Q): dy/dQ = 1/(Q·ln10) → σ_y = σ_Q / (Q·ln10)
-    #             (noise shrinks near Q=1, unlike the log10(1-Q) formulation)
+    # Binomial noise model: σy = √(Q(1-Q)/N).
+    # Returns σy=0 for deterministic mode (σy is ignored by GP in Q_det runs).
     @everywhere function sigma_y_fun(Q_raw::Float64, N::Int)
         optimize_det && return 0.0
-        if sigma_mode === :binomial
-            one_minus_Q = max(1.0 - Q_raw, 1e-15)
-            σ_Q = sqrt(max(Q_raw, 0.0) * one_minus_Q / N)
-            return use_log_fidelity ? σ_Q / (max(Q_raw, 1e-15) * log(10)) : σ_Q
-        else  # :simple
-            return 1.0 / sqrt(N)
-        end
+        one_minus_Q = max(1.0 - Q_raw, 1e-15)
+        return sqrt(max(Q_raw, 0.0) * one_minus_Q / N)
     end
 
-    # Returns (y, σy) where y is the (log-)fidelity and σy is the GP observation noise.
-    # N is passed directly from bayesopt_ucb_threshold; no captured N_shots const needed.
+    # Returns (y, σy): linear Q scale, binomial noise.
     @everywhere function Q_fun(u, N::Int)
         fcl, fsb, A = u_to_params(u)
         Q_raw = if optimize_det
@@ -143,64 +99,30 @@ try
         else
             CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=2)
         end
-        return (apply_log_fidelity(Q_raw), sigma_y_fun(Q_raw, N))
+        return (clamp(Q_raw, 0.0, 1.0), sigma_y_fun(Q_raw, N))
     end
 
     @everywhere function Q_true(u)
         fcl, fsb, A = u_to_params(u)
-        Q = clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
-        return apply_log_fidelity(Q)
+        return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
     end
 
     bounds = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
 
     α = 1.5
     κ = 1.9
-    # Resolve threshold: use user value if given, otherwise no threshold (fidelity_threshold = nothing).
-    Q_thresh = fidelity_threshold_Q
-    fidelity_threshold = Q_thresh === nothing ? nothing :
-                         (use_log_fidelity ? log10(max(Q_thresh, 1e-15)) : Q_thresh)
-    # For variable-N modes :ci/:verify, threshold must be in GP space (same as fidelity_threshold).
-    fidelity_threshold_vn = variable_n_mode ∈ (:ci, :verify) ? fidelity_threshold : nothing
 
-    # --- Resolve pretrained θ and freeze_mode from config flags ---
-    pretrain_file = joinpath(@__DIR__, "..", "data", pretrain_file_name)
-
-    pretrained_θ = if use_pretrained
-        if isfile(pretrain_file)
-            include(pretrain_file)
-            raw = pretrained_theta_all()
-            # pretrained_theta_all() returns either a single Vector{Float64} (one set of hypers)
-            # or a Vector{Vector{Float64}} (one per seed). In the latter case, average across seeds.
-            if raw isa Vector{<:AbstractVector}
-                mean(raw)
-            else
-                raw
-            end
-        else
-            @warn "Pretrained file not found: $pretrain_file — falling back to no pretraining"
-            nothing
-        end
-    else
-        nothing
-    end
-
-    freeze_mode = Symbol(freeze_mode_str)
+    fidelity_threshold = fidelity_threshold_Q  # linear Q scale (no log transform)
 
     optimization_mode = optimize_det ? "Q_det" : "Q_noisy"
 
     println("=== Starting Parallel Simulations (Random Seeds) ===")
     println("Optimization mode: $optimization_mode")
-    println("N_shots = $N_shots, sigma_mode = $sigma_mode, use_log_fidelity = $use_log_fidelity")
-    println("init_sampling = $init_sampling, acq_sampling = $acq_sampling, fixed_init_seed = $(fixed_init_seed === nothing ? "none (per-run)" : fixed_init_seed)")
+    println("N_shots = $N_shots, noise model = binomial")
     println("Fixed α = $α, κ = $κ")
-    println("Number of simulations: $num_sims")
-    println("Fidelity threshold: $(Q_thresh === nothing ? "none (fixed $n_iter iterations)" : "Q* = $Q_thresh → GP value = $fidelity_threshold $(use_log_fidelity ? "(log10 scale)" : "(linear scale)")")")
-    println("Min iterations before early stopping: $min_iter, n_checks=$n_checks, add_check_points=$add_check_points")
-    println("freeze_mode = $freeze_mode, n_freeze_iters = $n_freeze_iters, use_pretrained = $use_pretrained")
-    println("n_restarts = $n_restarts (BO loop), $(n_restarts + 2) (final fit)")
-    println("variable_n_mode = $variable_n_mode$(variable_n_mode === :none ? "" : ", n_floor=$n_floor, n_max=$n_max_shots, acq_n_mode=$acq_n_mode")$(variable_n_mode === :s2 ? ", sigma_levels=$sigma_levels" : "")$(variable_n_mode === :mean ? ", n_precision=$n_precision" : "")$(variable_n_mode ∈ (:ci,:verify) ? ", n_precision=$n_precision (acq :mean), fidelity_threshold_vn=$fidelity_threshold_vn" : "")")
-    println("Maximize: true (log10(Q) mode also maximizes, approaching 0 from below)")
+    println("Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
+    println("Fidelity threshold: $(fidelity_threshold_Q === nothing ? "none (fixed $n_iter iterations)" : "Q* = $fidelity_threshold_Q (linear)")")
+    println("use_variable_mode = $use_variable_mode$(use_variable_mode ? ", n_floor=$n_floor, n_max=$n_max_shots" : "")")
 
     start_time = time()
 
@@ -219,42 +141,22 @@ try
         vcat(_fixed_seeds, extra)
     end
 
-    # Capture all config as locals so pmap serializes values, not globals.
-    _explore_frac = explore_frac
-    _pretrained_θ = pretrained_θ
-    # When optimizing deterministically, σy=0 everywhere so c has no effect — skip learning it.
-    _learn_noise_scale = !optimize_det
-    _freeze_mode = freeze_mode
-    _n_freeze_iters = n_freeze_iters
-    _random_seeds = random_seeds
-    _explore_frac = explore_frac
-    _init_sampling = init_sampling
-    _acq_sampling  = acq_sampling
-    _min_iter          = min_iter
-    _n_checks          = n_checks
-    _add_check_points  = add_check_points
-    _fixed_init_seed      = fixed_init_seed
-    _fixed_acq_seed       = fixed_acq_seed
-    _fixed_rec_seed       = fixed_rec_seed
-    _n_restarts           = n_restarts
-    _n_iter               = n_iter
-    _variable_n_mode      = variable_n_mode
-    _n_floor              = n_floor
-    _n_max_shots          = n_max_shots
-    _n_precision          = n_precision
-    _acq_n_mode           = acq_n_mode
-    _sigma_levels         = sigma_levels
-    _fidelity_threshold_vn = fidelity_threshold_vn
+    _random_seeds        = random_seeds
+    _n_iter              = n_iter
+    _use_variable_mode     = use_variable_mode
+    _n_floor             = n_floor
+    _n_max_shots         = n_max_shots
+    _n_restarts          = n_restarts
+    _learn_noise_scale   = !optimize_det
 
     results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
         try
             seed = _random_seeds[sim_idx]
-            println("Starting simulation...")
+            println("Starting simulation $sim_idx...")
             flush(stdout)
             res = CalibrationCode.bayesopt_ucb_threshold(Q_fun;
                 bounds=bounds,
                 n_shots=N_shots,
-                sigma_mode=sigma_mode,
                 n_init=n_initial_samples,
                 n_iter=_n_iter,
                 κ=κ,
@@ -262,46 +164,26 @@ try
                 seed=seed,
                 maximize=true,
                 fidelity_threshold=fidelity_threshold,
-                min_iter=_min_iter,
-                n_checks=_n_checks,
-                add_check_points=_add_check_points,
-                pretrained_θ=_pretrained_θ,
-                freeze_mode=_freeze_mode,
-                n_freeze_iters=_n_freeze_iters,
-                explore_frac=_explore_frac,
+                explore_frac=0.0,
                 hyper_every=hyper_every,
-                init_sampling=_init_sampling,
-                acq_sampling=_acq_sampling,
-                fixed_init_seed=_fixed_init_seed,
-                fixed_acq_seed=_fixed_acq_seed,
-                fixed_rec_seed=_fixed_rec_seed,
                 learn_noise_scale=_learn_noise_scale,
                 n_restarts=_n_restarts,
-                variable_n_mode=_variable_n_mode,
+                use_variable_mode=_use_variable_mode,
                 n_floor=_n_floor,
                 n_max_shots=_n_max_shots,
-                n_precision=_n_precision,
-                acq_n_mode=_acq_n_mode,
-                sigma_levels=_sigma_levels,
-                fidelity_threshold_vn=_fidelity_threshold_vn,
-                use_log_fidelity=use_log_fidelity,
             )
 
-            # Always calculate true Q_det in original scale for reporting
             fcl, fsb, A = u_to_params(res.x_rec)
             Q_det_val = clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
             n_iters = res.n_iter_actual > 0 ? res.n_iter_actual : _n_iter
 
-            # Convert y values back to Q scale if log_fidelity was used (y = log10(Q) → Q = 10^y)
-            # y_last = last acquisition sample; y_rec = GP posterior mean at recommended point
-            Q_noisy_val = use_log_fidelity ? 10^res.y_last : res.y_last
-            Q_rec_val   = use_log_fidelity ? 10^res.y_rec  : res.y_rec
+            Q_noisy_val = res.y_last   # linear Q scale
+            Q_rec_val   = res.y_rec    # GP posterior mean at recommended point
 
-            # Total shots: all f calls including check calls not added to training data
             total_shots_used = res.total_shots
-            n_train = length(res.σy)   # training points added to GP (may be < total calls)
+            n_train = length(res.σy)
 
-            println("Simulation $sim_idx → Q_det = $(Q_det_val), Q_rec = $(round(Q_rec_val, digits=4)), iterations: $n_iters, total_shots: $total_shots_used")
+            println("Simulation $sim_idx → Q_det = $(round(Q_det_val, digits=4)), Q_rec = $(round(Q_rec_val, digits=4)), iterations: $n_iters, total_shots: $total_shots_used")
             flush(stdout)
 
             (
@@ -348,7 +230,6 @@ try
     total_train = sum(r.n_train for r in results_grid)
 
     println("\n=== RESULTS SUMMARY ===")
-    optimization_mode = optimize_det ? "Q_det" : "Q_noisy"
     println("Optimization mode: $optimization_mode")
     println("Best Q_det = ", best_result.Q_det, " (Simulation ", best_result.sim_idx, ")")
     println("Average Q_det = ", avg_Q_det, " ± ", std_Q_det)
@@ -373,26 +254,21 @@ try
     println("Recommended A    = ", A_rec)
     println("Baseline   f_cl = ", f_cl0, "  f_sb = ", f_sb0, "  A = ", A0)
 
-    println("\n=== All Results ===")
-    ℓ_headers = join(["ℓ$i" for i in 1:length(bounds)], "\t")
-    println("Sim\tSeed\tQ_det\tQ_noisy\tQ_rec\tIterations\tTotalShots\tNTrain\t$ℓ_headers\tσf\tc")
-    for r in results_grid
-        ℓ_str = join(round.(r.ℓ_final, digits=4), "\t")
-        println("$(r.sim_idx)\t$(r.seed)\t$(r.Q_det)\t$(r.Q_noisy)\t$(r.Q_rec)\t$(r.n_iterations)\t$(r.total_shots)\t$(r.n_train)\t$ℓ_str\t$(round(r.σf_final,digits=4))\t$(round(r.c_final,digits=4))")
-    end
-
     elapsed_seconds = time() - start_time
     elapsed_total = round(Int, elapsed_seconds)
     elapsed_hours = elapsed_total ÷ 3600
     elapsed_minutes = (elapsed_total % 3600) ÷ 60
     elapsed_secs = elapsed_total % 60
     elapsed_hms = string(elapsed_hours, ":", lpad(string(elapsed_minutes), 2, '0'), ":", lpad(string(elapsed_secs), 2, '0'))
+
     output_file = joinpath(@__DIR__, "..", "data", output_file_name)
     open(output_file, "w") do io
         println(io, "=== BENCHMARK RESULTS ===")
-        println(io, "Optimization mode: $optimization_mode, N_shots = $N_shots, sigma_mode = $sigma_mode, use_log_fidelity = $use_log_fidelity")
+        println(io, "Optimization mode: $optimization_mode, N_shots = $N_shots, noise model = binomial")
         println(io, "Fixed α = $α, κ = $κ")
-        println(io, "Number of simulations: $num_sims")
+        println(io, "Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
+        println(io, "Fidelity threshold: $(fidelity_threshold_Q === nothing ? "none" : "Q* = $fidelity_threshold_Q")")
+        println(io, "use_variable_mode = $use_variable_mode$(use_variable_mode ? ", n_floor=$n_floor, n_max=$n_max_shots" : "")")
         println(io, "Elapsed time: $elapsed_hms")
         println(io, "")
         println(io, "=== RESULTS SUMMARY ===")
