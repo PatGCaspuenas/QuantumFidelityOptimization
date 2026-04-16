@@ -1,6 +1,9 @@
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+
 using Random
 using Distributions
-include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
 using .CalibrationCode
 
 function main(; seed=3)
@@ -20,8 +23,8 @@ function main(; seed=3)
         σ_levels=σ_levels,
         n_init=10,
         n_iter=80,
-        κ=1.75,
-        α=18.0,
+        κ=2.0,
+        α=0.5,
         seed=seed
     )
 
@@ -36,6 +39,6 @@ function main(; seed=3)
     end
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
+if !isinteractive()
     main()
 end

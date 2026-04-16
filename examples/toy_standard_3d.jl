@@ -1,6 +1,9 @@
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+
 using Random
 using Distributions
-include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
 using .CalibrationCode
 
 function main(; seed=2, σ=0.02)
@@ -12,7 +15,7 @@ function main(; seed=2, σ=0.02)
 
     bounds = [(-1.0, 1.0), (-1.0, 1.0), (0.0, 1.0)]
 
-    res, x_rec, y_rec = CalibrationCode.bayesopt(f_noisy;
+    res = CalibrationCode.bayesopt(f_noisy;
         bounds=bounds,
         n_init=10,
         n_iter=80,
@@ -23,6 +26,9 @@ function main(; seed=2, σ=0.02)
     )
 
     best_idx = argmax(res.y)
+    x_rec = vec(res.X[:, best_idx])
+    y_rec = res.y[best_idx]
+
     x_best = vec(res.X[:, best_idx])
     println("Best observed x = ", x_best, "   best observed y = ", res.y[best_idx])
     println("Recommended x (posterior mean argmax) = ", x_rec, "   y ≈ ", y_rec)
@@ -32,6 +38,6 @@ function main(; seed=2, σ=0.02)
         sqrt((x_rec[1]-0.2)^2 + (x_rec[2]+0.4)^2 + (x_rec[3]-0.7)^2))
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
+if !isinteractive()
     main()
 end

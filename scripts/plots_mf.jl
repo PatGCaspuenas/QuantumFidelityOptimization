@@ -4,12 +4,6 @@
 using Plots
 using Random, Statistics
 using Distributions, GaussianProcesses
-
-import Pkg
-Pkg.activate(joinpath(@__DIR__, ".."))
-Pkg.instantiate()
-
-include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
 using .CalibrationCode
 
 function _grid(bounds, nx, ny)

@@ -17,7 +17,7 @@ using Random
 using Statistics
 using Plots
 using Measures
-using CalibrationCode
+using .CalibrationCode
 
 # Optional: silence IonSim / other package stderr chatter
 redirect_stderr(devnull)
@@ -337,6 +337,6 @@ function main(; cfg=CFG, verbose=false)
     return nothing
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
+if !isinteractive()
     main()
 end

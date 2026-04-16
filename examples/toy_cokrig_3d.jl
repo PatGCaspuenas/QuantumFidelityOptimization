@@ -1,6 +1,9 @@
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+
 using Random
 using Distributions
-include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
 using .CalibrationCode
 
 function main(; seed=4)
@@ -13,16 +16,16 @@ function main(; seed=4)
     σ = [0.06, 0.03, 0.015]
     costs = [1.0, 5.0, 25.0]
 
-    function f_level(x, level::Int)
-        level == 1 && return f_lo(x)  + rand(rng, Normal(0, σ[1]))
-        level == 2 && return f_mid(x) + rand(rng, Normal(0, σ[2]))
-        level == 3 && return f_hi(x)  + rand(rng, Normal(0, σ[3]))
-        throw(ArgumentError("invalid level=$level"))
-    end
+    # One function per fidelity level (required by mfcokrig_bayesopt)
+    fs = [
+        x -> f_lo(x)  + rand(rng, Normal(0, σ[1])),
+        x -> f_mid(x) + rand(rng, Normal(0, σ[2])),
+        x -> f_hi(x)  + rand(rng, Normal(0, σ[3])),
+    ]
 
     bounds = [(-1.0, 1.0), (-1.0, 1.0), (0.0, 1.0)]
 
-    res = CalibrationCode.mfcokrig_bayesopt(f_level;
+    res = CalibrationCode.mfcokrig_bayesopt(fs;
         bounds=bounds,
         costs=costs,
         n_init=22,
@@ -39,6 +42,6 @@ function main(; seed=4)
         sqrt((res.x_rec[1]-0.2)^2 + (res.x_rec[2]+0.4)^2 + (res.x_rec[3]-0.7)^2))
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
+if !isinteractive()
     main()
 end

@@ -79,7 +79,7 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
                       θ_init::Union{Nothing,Vector{Float64}}=nothing,
                       ℓ_bounds::Tuple{Float64,Float64}=(0.05, 1.5),
                       σf_bounds::Tuple{Float64,Float64}=(0.3, 2.0),
-                      c_bounds::Tuple{Float64,Float64}=(0.3, 3.0),
+                      c_bounds::Tuple{Float64,Float64}=(0.05, 3.0),
                       rng::Random.AbstractRNG=Random.default_rng())
 
     _validate_gp_inputs(X, y, σy)
@@ -91,10 +91,10 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
     σstd0 = (σy ./ yσ)
 
     d, n = size(X)
-    p = learn_noise_scale ? (d + 2) : (d + 1)
+    p_opt = learn_noise_scale ? d + 2 : d + 1
 
-    lower = Vector{Float64}(undef, p)
-    upper = Vector{Float64}(undef, p)
+    lower = Vector{Float64}(undef, p_opt)
+    upper = Vector{Float64}(undef, p_opt)
     lower[1:d] .= log(ℓ_bounds[1]);  upper[1:d] .= log(ℓ_bounds[2])
     lower[d+1]  = log(σf_bounds[1]); upper[d+1]  = log(σf_bounds[2])
     if learn_noise_scale
@@ -123,22 +123,21 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
     function nlml(θ::Vector{Float64})
         F = chol_from_θ(θ)
         F === nothing && return Inf
-        # solve (K+Σ)^{-1} y
         αtmp = F \ ystd
         return 0.5 * dot(ystd, αtmp) + sum(log, diag(F.L)) + 0.5 * n * log(2π)
     end
 
-    # starting point
-    θ0 = Vector{Float64}(undef, p)
-    if θ_init !== nothing && length(θ_init) == p
-        θ0 .= clamp.(θ_init, lower, upper)
+    _θ_ε = 1e-4
+    θ0 = Vector{Float64}(undef, p_opt)
+    if θ_init !== nothing && length(θ_init) == p_opt
+        θ0 .= clamp.(θ_init, lower .+ _θ_ε, upper .- _θ_ε)
     else
         θ0[1:d] .= log(0.3)
         θ0[d+1]  = log(1.0)
         if learn_noise_scale
             θ0[d+2] = log(1.0)
         end
-        θ0 .= clamp.(θ0, lower, upper)
+        θ0 .= clamp.(θ0, lower .+ _θ_ε, upper .- _θ_ε)
     end
 
     if !learn_hypers
@@ -160,7 +159,7 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
     for r in 1:n_restarts
         θstart = copy(θ0)
         if r > 1
-            @inbounds for i in 1:p
+            @inbounds for i in 1:p_opt
                 θstart[i] = lower[i] + rand(rng) * (upper[i] - lower[i])
             end
         end
@@ -219,16 +218,22 @@ end
 # -------------------------
 
 struct HeteroBOResult
-    X::Matrix{Float64}                    # d×n
+    X::Matrix{Float64}                    # d×n  (training points only)
     y::Vector{Float64}                    # sign-adjusted if maximize=false
     σy::Vector{Float64}                   # noise std per observation
     bounds::Vector{Tuple{Float64,Float64}}
-    σ_levels::Vector{Float64}
+    n_shots::Int                          # shots per f call
     n_init::Int
     n_iter::Int
     maximize::Bool
     x_rec::Vector{Float64}
     y_rec::Float64
+    n_iter_actual::Int                    # actual iterations run (< n_iter if early stopping)
+    y_last::Float64                       # last noisy observation (sign-adjusted)
+    ℓ_final::Vector{Float64}             # final GP lengthscales (original scale)
+    σf_final::Float64                    # final GP signal std (original scale)
+    c_final::Float64                     # final GP noise scale (original scale)
+    total_shots::Int                      # total shots used across ALL f calls (incl. check calls not in X)
 end
 
 @inline function _validate_bounds(bounds)
@@ -240,6 +245,30 @@ end
     return nothing
 end
 
+# Returns true if x is at least min_dist away (Euclidean) from all n filled columns of X.
+# Used to prevent near-duplicate training points that ill-condition the kernel matrix K.
+@inline function _is_far_enough(x::AbstractVector{Float64}, X::Matrix{Float64}, n::Int;
+                                 min_dist::Float64=1e-4)
+    @inbounds for i in 1:n
+        d2 = 0.0
+        for j in eachindex(x)
+            u = x[j] - X[j, i]
+            d2 += u * u
+        end
+        d2 < min_dist * min_dist && return false
+    end
+    return true
+end
+
+# f(x, N) must return a tuple (y::Float64, σy::Float64).
+# y  is the fidelity observation (linear Q scale).
+# σy is the GP observation noise: √(Q(1-Q)/N) for binomial noise model.
+@inline function _call_f_raw(f, x::Vector{Float64}, n::Int)
+    result = f(x, n)
+    result isa Tuple || throw(ArgumentError("f must return a (y, σy) tuple when called with N::Int"))
+    return Float64(result[1]), Float64(result[2])
+end
+
 @inline function _rand_in_box(rng::Random.AbstractRNG, lb::Vector{Float64}, ub::Vector{Float64})
     d = length(lb)
     x = Vector{Float64}(undef, d)
@@ -249,54 +278,107 @@ end
     return x
 end
 
-# μ is the fidelity of the GP at the given point. s2 is the variance. 
+# μ is the fidelity of the GP at the given point. s2 is the variance.
 # The larger kappa is, the more exploration the acquisition function does.
 @inline ucb_score(μ::Float64, s2::Float64, κ::Float64) = μ + κ * sqrt(max(s2, 0.0))
 
-function choose_sigma_threshold(s2::Float64, σ_levels::Vector{Float64}; α::Float64=0.5)
-    isempty(σ_levels) && throw(ArgumentError("σ_levels must be non-empty"))
-    all(s -> isfinite(s) && s ≥ 0, σ_levels) || throw(ArgumentError("σ_levels must be finite and ≥ 0"))
-    thresh = α * sqrt(max(s2, 0.0))
 
-    best = nothing
-    for σ in σ_levels
-        if σ <= thresh
-            if best === nothing || σ > best
-                best = σ
-            end
-        end
-    end
-    return best === nothing ? minimum(σ_levels) : best
-end
+"""
+    recommend_mean(gp, bounds; M, rng) -> (x_rec, m_rec, s_rec)
 
+Find the point with highest GP posterior mean within `bounds`.
+
+Global search over `M` random candidates, then local refinement with
+bounded L-BFGS from the best candidate.
+
+Returns `(x_rec, m_rec, s_rec)` where `m_rec` is the posterior mean
+and `s_rec` is the posterior std at `x_rec` (useful for LCB stopping checks).
+"""
 function recommend_mean(gp::HeteroGP, bounds; M::Int=20000, rng::Random.AbstractRNG=Random.default_rng())
     M ≥ 1 || throw(ArgumentError("M must be ≥ 1"))
     lb = Float64[b[1] for b in bounds]
     ub = Float64[b[2] for b in bounds]
+
+    # Global random search
     best_x = _rand_in_box(rng, lb, ub)
-    best_m = -Inf
+    μ0, s2_0 = predict_latent(gp, best_x)
+    best_m = μ0
+    best_s = sqrt(max(s2_0, 0.0))
     for _ in 1:M
         x = _rand_in_box(rng, lb, ub)
-        μ, _ = predict_latent(gp, x)
+        μ, s2 = predict_latent(gp, x)
         if μ > best_m
             best_m = μ
+            best_s = sqrt(max(s2, 0.0))
             best_x = x
         end
     end
-    return best_x, best_m
+
+    # Local refinement: bounded L-BFGS with finite-diff gradients.
+    try
+        res = optimize(x -> begin μ, _ = predict_latent(gp, x); -μ end,
+                       lb, ub, copy(best_x),
+                       Fminbox(LBFGS()),
+                       Optim.Options(iterations=100, g_tol=1e-5, f_abstol=1e-10);
+                       autodiff=:finite)
+        x_ref = Optim.minimizer(res)
+        μ_ref, s2_ref = predict_latent(gp, x_ref)
+        if μ_ref > best_m
+            best_m = μ_ref
+            best_s = sqrt(max(s2_ref, 0.0))
+            best_x = x_ref
+        end
+    catch
+        # If refinement fails (rare), fall back to random-search result
+    end
+
+    return best_x, best_m, best_s
 end
 
-function count_noise_levels(res::HeteroBOResult; atol::Float64=1e-12)
-    counts = Dict(σ => 0 for σ in res.σ_levels)
-    for s in res.σy
-        j = findfirst(σ -> isapprox(s, σ; atol=atol, rtol=0), res.σ_levels)
-        if j === nothing
-            counts[s] = get(counts, s, 0) + 1
-        else
-            counts[res.σ_levels[j]] += 1
-        end
+# -------------------------
+# Variable-N helper: variable mode
+# -------------------------
+
+# Adaptive measurement for :variable mode (binomial noise, linear Q scale).
+# Starts with n_floor shots, accumulates in batches until:
+#   - Q falls below threshold (was noise) → stop_loop=false
+#   - n_max reached with Q still above threshold → stop_loop=true (confirmed above)
+# Returns (y_out, σy_out, N_total_used, stop_loop).
+function _adaptive_measure(f, x::Vector{Float64},
+                           n_floor::Int, n_max::Int,
+                           threshold::Float64,
+                           maximize::Bool,
+                           batch_size::Int=50)
+    y1, _ = _call_f_raw(f, x, n_floor)
+    Q_cur   = clamp(y1, 0.0, 1.0)
+    k_total = Q_cur * Float64(n_floor)
+    N_total = n_floor
+
+    # Only activate if initial measurement is above threshold
+    at_or_above = maximize ? (Q_cur >= threshold) : (Q_cur <= threshold)
+    if !at_or_above
+        σy_f = sqrt(max(Q_cur * (1.0 - Q_cur), 0.0) / N_total)
+        return Q_cur, σy_f, N_total, false
     end
-    return counts
+
+    while N_total < n_max
+        Q_cur  = k_total / Float64(N_total)
+        fell_below = maximize ? (Q_cur < threshold) : (Q_cur > threshold)
+        fell_below && break
+
+        Δ = min(batch_size, n_max - N_total)
+        y_new, _ = _call_f_raw(f, x, Δ)
+        Q_new = clamp(y_new, 0.0, 1.0)
+        k_total += Q_new * Float64(Δ)
+        N_total += Δ
+    end
+
+    Q_final  = k_total / Float64(N_total)
+    stop_loop = maximize ? (N_total >= n_max && Q_final >= threshold) :
+                           (N_total >= n_max && Q_final <= threshold)
+    σy_final = sqrt(max(Q_final * (1.0 - Q_final), 0.0) / Float64(N_total))
+
+    return Q_final, σy_final, N_total, stop_loop
 end
 
 # -------------------------
@@ -304,17 +386,21 @@ end
 # -------------------------
 
 """
-    bayesopt_ucb_threshold(f; bounds, σ_levels, ...)
+    bayesopt_ucb_threshold(f; bounds, n_shots, ...)
 
-Heteroscedastic BO with GP-UCB acquisition for x and thresholding rule for σ selection.
-Objective is `f(x, σ)`.
+Heteroscedastic BO with GP-UCB acquisition. Noise model: binomial (√(Q(1-Q)/N)).
+
+`use_variable_mode`:
+  - `false` — fixed N_shots per acquisition; optional threshold check via two noisy evaluations.
+  - `true`  — adaptive shots at x_rec each iteration; early stop when confirmed above threshold.
+              Acquisition point always uses n_floor shots. Requires `fidelity_threshold`.
 
 Set `maximize=false` to minimize.
 Use `seed` for determinism without affecting the global RNG.
 """
 function bayesopt_ucb_threshold(f;
                                bounds::Vector{Tuple{Float64,Float64}},
-                               σ_levels::Vector{Float64},
+                               n_shots::Int=400,
                                n_init::Int=8,
                                n_iter::Int=30,
                                M_acq::Int=5000,
@@ -325,87 +411,174 @@ function bayesopt_ucb_threshold(f;
                                hyper_every::Int=10,
                                rng::Random.AbstractRNG=Random.default_rng(),
                                seed=nothing,
-                               verbose::Bool=false)
+                               verbose::Bool=false,
+                               fidelity_threshold::Union{Nothing,Float64}=nothing,
+                               explore_frac::Float64=0.0,
+                               learn_noise_scale::Bool=true,
+                               n_restarts::Int=6,
+                               use_variable_mode::Bool=false,
+                               n_floor::Int=50,
+                               n_max_shots::Int=2000)
 
     _validate_bounds(bounds)
-    isempty(σ_levels) && throw(ArgumentError("σ_levels must be non-empty"))
     n_init ≥ 1 || throw(ArgumentError("n_init must be ≥ 1"))
     n_iter ≥ 0 || throw(ArgumentError("n_iter must be ≥ 0"))
     M_acq ≥ 1  || throw(ArgumentError("M_acq must be ≥ 1"))
     M_rec ≥ 1  || throw(ArgumentError("M_rec must be ≥ 1"))
     κ ≥ 0      || throw(ArgumentError("κ must be ≥ 0"))
     α ≥ 0      || throw(ArgumentError("α must be ≥ 0"))
+    n_shots ≥ 1   || throw(ArgumentError("n_shots must be ≥ 1"))
+    n_floor ≥ 1 || throw(ArgumentError("n_floor must be ≥ 1"))
+    n_max_shots ≥ n_floor || throw(ArgumentError("n_max_shots must be ≥ n_floor"))
+    (use_variable_mode && fidelity_threshold === nothing) &&
+        throw(ArgumentError("fidelity_threshold required for use_variable_mode=true"))
 
     rng_local = seed === nothing ? rng : MersenneTwister(seed)
 
     lb = Float64[b[1] for b in bounds]
     ub = Float64[b[2] for b in bounds]
 
-    f_eval = maximize ? f : ((x, σ) -> -f(x, σ))
-
     d = length(bounds)
-    n_total = n_init + n_iter
-    X  = Matrix{Float64}(undef, d, n_total)
-    y  = Vector{Float64}(undef, n_total)
-    σy = Vector{Float64}(undef, n_total)
+    # Pre-allocate with extra capacity for x_rec check calls.
+    n_cap = n_init + 3 * n_iter
+    X  = Matrix{Float64}(undef, d, n_cap)
+    y  = Vector{Float64}(undef, n_cap)
+    σy = Vector{Float64}(undef, n_cap)
+    write_idx         = 0
+    total_shots_count = 0
 
+    # Initial design: uniform random
     for i in 1:n_init
         x = _rand_in_box(rng_local, lb, ub)
-        σ0 = rand(rng_local, σ_levels)
-        X[:, i] = x
-        σy[i] = σ0
-        y[i] = f_eval(x, σ0)
+        y_raw, σy_i = _call_f_raw(f, x, n_shots)
+        total_shots_count += n_shots
+        write_idx += 1
+        X[:, write_idx] = x
+        y[write_idx]  = maximize ? y_raw : -y_raw
+        σy[write_idx] = σy_i
     end
 
     θ_prev = nothing
+    n_iter_actual = n_iter
+    y_last_val = 0.0
 
     for it in 1:n_iter
-        idx = n_init + it
         do_opt = (it == 1) || (hyper_every > 0 && it % hyper_every == 0)
-
-        gp = fit_heterogp(X[:, 1:(idx-1)], y[1:(idx-1)], σy[1:(idx-1)];
+        gp = fit_heterogp(X[:, 1:write_idx], y[1:write_idx], σy[1:write_idx];
                           θ_init=θ_prev,
                           learn_hypers=do_opt,
-                          learn_noise_scale=true,
-                          n_restarts=do_opt ? 6 : 0,
+                          learn_noise_scale=learn_noise_scale,
+                          n_restarts=do_opt ? n_restarts : 0,
                           jitter=1e-8,
                           rng=rng_local)
-
         θ_prev = gp.θ
 
-        best_x = _rand_in_box(rng_local, lb, ub)
-        best_a = -Inf
-        best_s2 = 0.0
+        # Acquisition: random candidates + optional explore fraction
+        best_x  = _rand_in_box(rng_local, lb, ub)
+        best_a  = -Inf
 
-        for _ in 1:M_acq
+        for i in 1:M_acq
             x = _rand_in_box(rng_local, lb, ub)
             μ, s2 = predict_latent(gp, x)
             a = ucb_score(μ, s2, κ)
             if a > best_a
                 best_a = a
                 best_x = x
-                best_s2 = s2
             end
         end
 
-        σ_next = choose_sigma_threshold(best_s2, σ_levels; α=α)
+        # Acquisition N: n_shots for fixed mode, n_floor for variable mode
+        n_acq = use_variable_mode ? n_floor : n_shots
 
-        X[:, idx] = best_x
-        σy[idx] = σ_next
-        y[idx] = f_eval(best_x, σ_next)
+        y_raw, σy_i = _call_f_raw(f, best_x, n_acq)
+        total_shots_count += n_acq
+        if _is_far_enough(best_x, X, write_idx)
+            write_idx += 1
+            X[:, write_idx] = best_x
+            y[write_idx]  = maximize ? y_raw : -y_raw
+            σy[write_idx] = σy_i
+        end
+        y_last_val = maximize ? y_raw : -y_raw
 
         if verbose
-            @info "it=$it best_acq=$best_a σ=$σ_next"
+            @info "it=$it best_acq=$best_a"
+        end
+
+        # --- variable mode: adaptive measurement at x_rec ---
+        if use_variable_mode
+            x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+            y_rec_cur, σy_rec_cur, n_rec, stop_loop = _adaptive_measure(
+                f, x_rec_cur, n_floor, n_max_shots, fidelity_threshold, maximize)
+            total_shots_count += n_rec
+
+            if _is_far_enough(x_rec_cur, X, write_idx)
+                write_idx += 1
+                X[:, write_idx] = x_rec_cur
+                y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
+                σy[write_idx] = σy_rec_cur
+            end
+
+            if stop_loop
+                n_iter_actual = it
+                y_out = maximize ? y[1:write_idx] : -y[1:write_idx]
+                return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
+                                      bounds, n_shots, n_init, n_iter, maximize,
+                                      x_rec_cur, y_rec_cur, n_iter_actual,
+                                      maximize ? y_last_val : -y_last_val,
+                                      gp.ℓ, gp.σf, gp.c, total_shots_count)
+            end
+        end
+
+        # --- Fixed-N threshold check: two noisy evaluations at x_rec ---
+        if fidelity_threshold !== nothing && !use_variable_mode
+            x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+            y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
+            total_shots_count += n_shots
+            if _is_far_enough(x_rec_cur, X, write_idx)
+                write_idx += 1
+                X[:, write_idx] = x_rec_cur
+                y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
+                σy[write_idx] = σy1_i
+            end
+
+            y1 = maximize ? y_rec_cur : -y_rec_cur
+            reached1 = maximize ? (y1 >= fidelity_threshold) : (y1 <= fidelity_threshold)
+            if reached1
+                y2_raw, _ = _call_f_raw(f, x_rec_cur, n_shots)
+                total_shots_count += n_shots
+                y2 = maximize ? y2_raw : -y2_raw
+                reached2 = maximize ? (y2 >= fidelity_threshold) : (y2 <= fidelity_threshold)
+                if reached2
+                    n_iter_actual = it
+                    y_rec_avg = (y_rec_cur + y2_raw) / 2
+                    y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
+                    return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
+                                          bounds, n_shots, n_init, n_iter, maximize,
+                                          x_rec_cur, y_rec_avg, n_iter_actual,
+                                          maximize ? y_last_val : -y_last_val,
+                                          gp.ℓ, gp.σf, gp.c, total_shots_count)
+                end
+            end
         end
     end
 
-    gp = fit_heterogp(X, y, σy; θ_init=θ_prev, learn_hypers=true, learn_noise_scale=true,
-                      n_restarts=8, jitter=1e-8, rng=rng_local)
+    # Final GP fit with extra restarts
+    gp = fit_heterogp(X[:, 1:write_idx], y[1:write_idx], σy[1:write_idx];
+                      θ_init=θ_prev,
+                      learn_hypers=true,
+                      learn_noise_scale=learn_noise_scale,
+                      n_restarts=n_restarts + 2,
+                      jitter=1e-8,
+                      rng=rng_local)
 
-    x_rec, m_rec = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+    x_rec, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+    y_rec_raw, _ = _call_f_raw(f, x_rec, n_shots)
+    total_shots_count += n_shots
 
-    y_out = maximize ? y : (-y)
-    y_rec = maximize ? m_rec : -m_rec
+    y_out = maximize ? y[1:write_idx] : -y[1:write_idx]
+    y_last_out = maximize ? y_last_val : -y_last_val
 
-    return HeteroBOResult(X, y_out, σy, bounds, σ_levels, n_init, n_iter, maximize, x_rec, y_rec)
+    return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx], bounds, n_shots,
+                          n_init, n_iter, maximize, x_rec, y_rec_raw, n_iter_actual,
+                          y_last_out, gp.ℓ, gp.σf, gp.c, total_shots_count)
 end

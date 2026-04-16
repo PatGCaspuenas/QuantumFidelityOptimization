@@ -82,18 +82,7 @@ calibration_code/
 
 ## Installation
 
-This repository is a Julia project.
-
-1. Install Julia (recommended: Julia ≥ 1.9).
-2. From the repository root, start Julia and instantiate:
-
-```julia
-import Pkg
-Pkg.activate(".")
-Pkg.instantiate()
-```
-
-If you need platform-specific notes (especially for `IonSim`/`QuantumOptics` dependencies), follow your local installation notes or the repository instructions if you maintain a separate installation guide.
+Please follow installation.md
 
 ---
 
@@ -146,22 +135,5 @@ The calibration model provides two estimators:
   Sampling-based estimator where `N` is the number of shots/samples.
 
 In the heteroscedastic BO scripts, the BO “noise level” `σ` is used as an algorithmic knob and is mapped to a shot count `N` (see `N_from_sigma(σ)` inside the scripts). This is where the cost/accuracy trade-off is controlled.
-
----
-
-## Reproducibility
-
-- All examples and scripts use explicit random seeds.
-- `Project.toml` and `Manifest.toml` are committed to support reproducible environments.
-
----
-
-## Citation
-
-If you use this repository in academic work, cite it as software and include the commit hash.
-
----
-
-## License
 
 Add a license file if you intend to distribute publicly (e.g., MIT/BSD/Apache-2.0).

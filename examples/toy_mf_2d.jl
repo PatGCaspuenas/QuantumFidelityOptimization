@@ -1,8 +1,10 @@
+import Pkg
+Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
+
 using Random
 using Distributions
 using Plots
-
-include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
 using .CalibrationCode
 
 include(joinpath(@__DIR__, "..", "scripts", "plots_mf.jl"))   # plot2d_mf / animate2d_mf (optional)
@@ -81,6 +83,6 @@ function main(; seed=1)
     println("Saved -> figures/toy_mf_2d_samples.png")
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
+if !isinteractive()
     main()
 end
