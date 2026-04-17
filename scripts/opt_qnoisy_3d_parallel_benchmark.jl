@@ -61,6 +61,19 @@ try
     # Maximum shots for :variable mode
     n_max_shots      = parse(Int, get(ENV, "BO_N_MAX",  "2000"))      # BO_N_MAX=2000
 
+    # Objective mode:
+    #   "2ms"             → Q_varMS(numMS=2), maximize F                     (default, original behavior)
+    #   "2ms_log"         → Q_varMS(numMS=2), minimize log10(1-F)
+    #   "3ms_balance"     → Q_varMS_balance(numMS=3), maximize 1-|P00-P11|
+    #   "3ms_balance_log" → Q_varMS_balance(numMS=3), minimize log10(1-F)
+    #   "jacobian"        → Q_ms_sequence with searched subgates, maximize
+    objective_mode   =           get(ENV, "BO_OBJECTIVE_MODE", "2ms")  # BO_OBJECTIVE_MODE=2ms/2ms_log/...
+    # 4D mode: adds inter-gate phase φ as 4th optimization dimension
+    use_4d           = get(ENV, "BO_USE_4D", "false") == "true"        # BO_USE_4D=true/false
+
+    _is_log_mode = objective_mode in ("2ms_log", "3ms_balance_log")
+    _do_maximize = !_is_log_mode
+
     t = 100.0
     base = CalibrationCode.ideal(t)
     f_cl0, f_sb0, A0 = base.f_cl, base.f_sb, base.A
@@ -69,6 +82,17 @@ try
     span_fcl = span_kHz * 1e3 * 2π
     span_fsb = span_kHz * 1e3 * 2π
     span_A = 1.2 * A0 - A0
+    span_phi = π / 2
+
+    # Load Jacobian-searched subgates if needed
+    _jacobian_subgates = if objective_mode == "jacobian"
+        _search_path = joinpath(@__DIR__, "..", "data", "ms_sequence_search_result.jl")
+        isfile(_search_path) || error("Search result not found: $_search_path — run scripts/ms_sequence_search.jl first")
+        _raw = include(_search_path)
+        [CalibrationCode.MSSubgate(sg.theta, sg.phi) for sg in _raw.best_overall.subgates]
+    else
+        CalibrationCode.MSSubgate[]
+    end
 
     @everywhere const t = $t
     @everywhere const f_cl0 = $f_cl0
@@ -77,47 +101,86 @@ try
     @everywhere const span_fcl = $span_fcl
     @everywhere const span_fsb = $span_fsb
     @everywhere const span_A = $span_A
+    @everywhere const span_phi = $span_phi
     @everywhere const optimize_det = $optimize_det
+    @everywhere const _objective_mode = $objective_mode
+    @everywhere const _use_4d = $use_4d
+    @everywhere const _is_log_mode = $_is_log_mode
+    @everywhere const _jac_subgates = $_jacobian_subgates
 
-    @everywhere u_to_params(u) = (f_cl0 + span_fcl * u[1],
-        f_sb0 + span_fsb * u[2],
-        A0 + span_A * u[3])
-
-    # Binomial noise model: σy = √(Q(1-Q)/N).
-    # Returns σy=0 for deterministic mode (σy is ignored by GP in Q_det runs).
-    @everywhere function sigma_y_fun(Q_raw::Float64, N::Int)
-        optimize_det && return 0.0
-        one_minus_Q = max(1.0 - Q_raw, 1e-15)
-        return sqrt(max(Q_raw, 0.0) * one_minus_Q / N)
+    @everywhere function u_to_params(u)
+        fcl = f_cl0 + span_fcl * u[1]
+        fsb = f_sb0 + span_fsb * u[2]
+        A   = A0    + span_A   * u[3]
+        if _use_4d
+            phi = span_phi * u[4]
+            return (fcl, fsb, A, phi)
+        end
+        return (fcl, fsb, A)
     end
 
-    # Returns (y, σy): linear Q scale, binomial noise.
-    @everywhere function Q_fun(u, N::Int)
-        fcl, fsb, A = u_to_params(u)
-        Q_raw = if optimize_det
-            clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
+    @everywhere function _eval_raw(fcl, fsb, A, N::Int; phi::Float64=0.0)
+        if _objective_mode == "3ms_balance" || _objective_mode == "3ms_balance_log"
+            return CalibrationCode.Q_varMS_balance(t, fcl, fsb, A; N=N, numMS=3)
+        elseif _objective_mode == "jacobian"
+            return clamp(CalibrationCode.Q_ms_sequence(t, fcl, fsb, A, _jac_subgates; N=N), 0.0, 1.0)
+        elseif _use_4d
+            subgates = [CalibrationCode.ms_subgate(π/2, 0.0), CalibrationCode.ms_subgate(π/2, phi)]
+            return clamp(CalibrationCode.Q_ms_sequence(t, fcl, fsb, A, subgates; N=N), 0.0, 1.0)
         else
-            CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=2)
+            if optimize_det
+                return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
+            else
+                return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=2)
+            end
         end
-        return (clamp(Q_raw, 0.0, 1.0), sigma_y_fun(Q_raw, N))
+    end
+
+    @everywhere function _to_objective(F_raw::Float64)
+        F = clamp(F_raw, 0.0, 1.0)
+        _is_log_mode && return log10(max(1.0 - F, 1e-10))
+        return F
+    end
+
+    @everywhere function _sigma_for_objective(F_raw::Float64, N::Int)
+        optimize_det && return 0.0
+        F = clamp(F_raw, 0.0, 1.0)
+        σ_F = sqrt(max(F * (1.0 - F), 0.0) / N)
+        if _is_log_mode
+            infid = max(1.0 - F, 1e-10)
+            return σ_F / (infid * log(10))
+        end
+        return σ_F
+    end
+
+    @everywhere function Q_fun(u, N::Int)
+        params = u_to_params(u)
+        phi = _use_4d ? params[4] : 0.0
+        F_raw = _eval_raw(params[1], params[2], params[3], N; phi=phi)
+        return (_to_objective(F_raw), _sigma_for_objective(F_raw, N))
     end
 
     @everywhere function Q_true(u)
-        fcl, fsb, A = u_to_params(u)
+        params = u_to_params(u)
+        fcl, fsb, A = params[1], params[2], params[3]
         return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
     end
 
-    bounds = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
+    bounds = use_4d ? [(-1.0,1.0),(-1.0,1.0),(-1.0,1.0),(-1.0,1.0)] : [(-1.0,1.0),(-1.0,1.0),(-1.0,1.0)]
 
     α = 1.5
     κ = 1.9
 
-    fidelity_threshold = fidelity_threshold_Q  # linear Q scale (no log transform)
+    fidelity_threshold = if _is_log_mode && fidelity_threshold_Q !== nothing
+        log10(max(1.0 - fidelity_threshold_Q, 1e-10))
+    else
+        fidelity_threshold_Q
+    end
 
-    optimization_mode = optimize_det ? "Q_det" : "Q_noisy"
+    optimization_mode = "$(objective_mode)$(use_4d ? "_4d" : "")$(optimize_det ? "_det" : "")"
 
     println("=== Starting Parallel Simulations (Random Seeds) ===")
-    println("Optimization mode: $optimization_mode")
+    println("Objective mode: $objective_mode, 4D: $use_4d, maximize: $_do_maximize")
     println("N_shots = $N_shots, noise model = binomial")
     println("Fixed α = $α, κ = $κ")
     println("Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
@@ -162,7 +225,7 @@ try
                 κ=κ,
                 α=α,
                 seed=seed,
-                maximize=true,
+                maximize=_do_maximize,
                 fidelity_threshold=fidelity_threshold,
                 explore_frac=0.0,
                 hyper_every=hyper_every,
@@ -173,7 +236,8 @@ try
                 n_max_shots=_n_max_shots,
             )
 
-            fcl, fsb, A = u_to_params(res.x_rec)
+            _params = u_to_params(res.x_rec)
+            fcl, fsb, A = _params[1], _params[2], _params[3]
             Q_det_val = clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
             n_iters = res.n_iter_actual > 0 ? res.n_iter_actual : _n_iter
 
@@ -247,11 +311,15 @@ try
     println("  c  = ", round(best_result.c_final,  digits=4))
     println("\nBest u_rec = ", best_result.x_rec)
 
-    fcl_rec, fsb_rec, A_rec = u_to_params(best_result.x_rec)
+    _best_params = u_to_params(best_result.x_rec)
+    fcl_rec, fsb_rec, A_rec = _best_params[1], _best_params[2], _best_params[3]
     println("\n=== BEST RESULT PHYSICAL PARAMETERS ===")
     println("Recommended f_cl = ", fcl_rec)
     println("Recommended f_sb = ", fsb_rec)
     println("Recommended A    = ", A_rec)
+    if use_4d
+        println("Recommended phi  = ", _best_params[4])
+    end
     println("Baseline   f_cl = ", f_cl0, "  f_sb = ", f_sb0, "  A = ", A0)
 
     elapsed_seconds = time() - start_time
@@ -265,7 +333,8 @@ try
     output_file = joinpath(_output_dir, output_file_name)
     open(output_file, "w") do io
         println(io, "=== BENCHMARK RESULTS ===")
-        println(io, "Optimization mode: $optimization_mode, N_shots = $N_shots, noise model = binomial")
+        println(io, "Optimization mode: $optimization_mode, objective: $objective_mode, 4D: $use_4d, maximize: $_do_maximize")
+        println(io, "N_shots = $N_shots, noise model = binomial")
         println(io, "Fixed α = $α, κ = $κ")
         println(io, "Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
         println(io, "Fidelity threshold: $(fidelity_threshold_Q === nothing ? "none" : "Q* = $fidelity_threshold_Q")")
@@ -295,6 +364,7 @@ try
         println(io, "Recommended f_cl = $fcl_rec")
         println(io, "Recommended f_sb = $fsb_rec")
         println(io, "Recommended A    = $A_rec")
+        use_4d && println(io, "Recommended phi  = $(_best_params[4])")
         println(io, "Baseline   f_cl = $f_cl0, f_sb = $f_sb0, A = $A0")
         println(io, "")
         println(io, "=== All Results ===")
