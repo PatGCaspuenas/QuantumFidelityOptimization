@@ -3,3 +3,5 @@ figures/
 *.png
 *.gif
 others/
+docs/
+.claude/
