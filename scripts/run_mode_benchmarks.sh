@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$REPO_DIR/scripts/opt_qnoisy_3d_parallel_benchmark.jl"
+SCRIPT="$REPO_DIR/scripts/opt_benchmark.jl"
 OUTPUT_DIR="$REPO_DIR/scripts/data"
 
 mkdir -p "$OUTPUT_DIR"
