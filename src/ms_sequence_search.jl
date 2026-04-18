@@ -5,52 +5,40 @@
 # whose nominal readout stays non-saturated enough to remain practical at low
 # shot count, without strictly enforcing a 0.5/0.5 operating point.
 
-const MS_SEARCH_TWO_PULSE_ANGLE_GRID = Float64[π / 4, 3π / 8, π / 2, 5π / 8]
-const MS_SEARCH_TWO_PULSE_PHASE_GRID = Float64[0.0, π / 8, π / 4, 3π / 8, π / 2]
-const MS_SEARCH_THREE_PULSE_OUTER_GRID = Float64[π / 4, 3π / 8, π / 2]
-const MS_SEARCH_THREE_PULSE_MIDDLE_GRID = Float64[π / 4, 3π / 8, π / 2, 5π / 8]
-const MS_SEARCH_THREE_PULSE_PHASE_GRID = Float64[0.0, π / 8, π / 4, 3π / 8, π / 2]
-const MS_SEARCH_THREE_PULSE_EPS_GRID = Float64[0.0, π / 16, π / 8]
-const MS_SEARCH_MIN_EVEN_PREFILTER = 0.0
+const MS_SEARCH_THETA_GRID = Float64[k * π / 16 for k in 1:15]
 const MS_SEARCH_MIN_EVEN_READOUT = 0.12
 
 const MS_SEARCH_PARAMETER_SCALES = (
     omega_ratio=1.0,
     centerline=1.0e3,
     sideband=1.0e3,
-    phase_error=π,
+    relative_phase=π,
 )
 
 const MS_SEARCH_PARAMETER_STEPS = (
     omega_ratio=0.01,
     centerline=250.0,
     sideband=250.0,
-    phase_error=π / 24,
+    relative_phase=π / 24,
 )
 
 function closed_loop_ms_candidate_sequences()
     candidates = NamedTuple[]
+    θs = MS_SEARCH_THETA_GRID
 
-    for θ1 in MS_SEARCH_TWO_PULSE_ANGLE_GRID,
-        θ2 in MS_SEARCH_TWO_PULSE_ANGLE_GRID,
-        φ2 in MS_SEARCH_TWO_PULSE_PHASE_GRID
+    for θ1 in θs, θ2 in θs
+        θ1 + θ2 ≤ π || continue
         push!(candidates, (
             family=:two_pulse,
-            subgates=[ms_subgate(θ1, 0.0), ms_subgate(θ2, φ2)],
+            subgates=[ms_subgate(θ1, 0.0), ms_subgate(θ2, 0.0)],
         ))
     end
 
-    for θ_outer in MS_SEARCH_THREE_PULSE_OUTER_GRID,
-        θ_mid in MS_SEARCH_THREE_PULSE_MIDDLE_GRID,
-        φ_mid in MS_SEARCH_THREE_PULSE_PHASE_GRID,
-        ϵ in MS_SEARCH_THREE_PULSE_EPS_GRID
+    for θ1 in θs, θ2 in θs, θ3 in θs
+        θ1 + θ2 + θ3 ≤ π || continue
         push!(candidates, (
             family=:three_pulse,
-            subgates=[
-                ms_subgate(θ_outer, 0.0),
-                ms_subgate(θ_mid, φ_mid),
-                ms_subgate(θ_outer, -ϵ),
-            ],
+            subgates=[ms_subgate(θ1, 0.0), ms_subgate(θ2, 0.0), ms_subgate(θ3, 0.0)],
         ))
     end
 
@@ -83,18 +71,17 @@ function ideal_even_subspace_probabilities(subgates::AbstractVector{<:MSSubgate}
 end
 
 function passes_nominal_prefilter(subgates::AbstractVector{<:MSSubgate})
-    probs = ideal_even_subspace_probabilities(subgates)
-    return min(probs.gg, probs.ee) >= MS_SEARCH_MIN_EVEN_PREFILTER
+    return true
 end
 
 function candidate_measurement(t, f_cl, Δ, I_pi2, subgates;
                                omega_ratio::Float64=1.0,
                                centerline::Float64=f_cl,
                                sideband::Float64=Δ,
-                               phase_error::Float64=0.0)
+                               relative_phase::Float64=0.0)
     pulses = build_closed_loop_ms_sequence(
         t, centerline, sideband, I_pi2, subgates;
-        phase_error=phase_error, omega_ratio=omega_ratio)
+        relative_phase=relative_phase, omega_ratio=omega_ratio)
     pops = populations_ms_sequence(pulses)
     probs = sequence_nominal_summary(pops)
     obs = ms_balance_and_odd(pops)
@@ -128,8 +115,8 @@ function candidate_jacobian(t, f_cl, Δ, I_pi2, subgates)
          normalized=MS_SEARCH_PARAMETER_STEPS.centerline / MS_SEARCH_PARAMETER_SCALES.centerline),
         (name=:sideband, actual=MS_SEARCH_PARAMETER_STEPS.sideband,
          normalized=MS_SEARCH_PARAMETER_STEPS.sideband / MS_SEARCH_PARAMETER_SCALES.sideband),
-        (name=:phase_error, actual=MS_SEARCH_PARAMETER_STEPS.phase_error,
-         normalized=MS_SEARCH_PARAMETER_STEPS.phase_error / MS_SEARCH_PARAMETER_SCALES.phase_error),
+        (name=:relative_phase, actual=MS_SEARCH_PARAMETER_STEPS.relative_phase,
+         normalized=MS_SEARCH_PARAMETER_STEPS.relative_phase / MS_SEARCH_PARAMETER_SCALES.relative_phase),
     )
 
     for (col_idx, spec) in enumerate(perturb_specs)
@@ -140,7 +127,7 @@ function candidate_jacobian(t, f_cl, Δ, I_pi2, subgates)
         elseif spec.name === :sideband
             candidate_measurement(t, f_cl, Δ, I_pi2, subgates; sideband=Δ + spec.actual)
         else
-            candidate_measurement(t, f_cl, Δ, I_pi2, subgates; phase_error=spec.actual)
+            candidate_measurement(t, f_cl, Δ, I_pi2, subgates; relative_phase=spec.actual)
         end
 
         minus = if spec.name === :omega_ratio
@@ -150,7 +137,7 @@ function candidate_jacobian(t, f_cl, Δ, I_pi2, subgates)
         elseif spec.name === :sideband
             candidate_measurement(t, f_cl, Δ, I_pi2, subgates; sideband=Δ - spec.actual)
         else
-            candidate_measurement(t, f_cl, Δ, I_pi2, subgates; phase_error=-spec.actual)
+            candidate_measurement(t, f_cl, Δ, I_pi2, subgates; relative_phase=-spec.actual)
         end
 
         J[:, col_idx] = (plus.obs - minus.obs) ./ (2.0 * spec.normalized)
@@ -174,7 +161,7 @@ function score_ms_candidate(t, f_cl, Δ, I_pi2, candidate)
             max_corr=1.0,
             singular_values=Float64[],
             fisher_eigs=Float64[],
-            column_norms=(omega_ratio=0.0, centerline=0.0, sideband=0.0, phase_error=0.0),
+            column_norms=(omega_ratio=0.0, centerline=0.0, sideband=0.0, relative_phase=0.0),
         ))
     end
 
@@ -208,7 +195,7 @@ function score_ms_candidate(t, f_cl, Δ, I_pi2, candidate)
             omega_ratio=column_norms[1],
             centerline=column_norms[2],
             sideband=column_norms[3],
-            phase_error=column_norms[4],
+            relative_phase=column_norms[4],
         ),
     ))
 end

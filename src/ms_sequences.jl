@@ -33,19 +33,21 @@ make_ms_pulse(t, f_cl, Δ, I, phi_1, phi_2) = (
 
 function build_closed_loop_ms_sequence(t, f_cl, Δ, I_pi2,
                                        subgates::AbstractVector{<:MSSubgate};
-                                       phase_error::Float64=0.0,
-                                       omega_ratio::Float64=1.0)
+                                       omega_ratio::Float64=1.0,
+                                       relative_phase::Float64=0.0,
+                                       phase_drift::Float64=0.0)
     pulses = Vector{NamedTuple}(undef, length(subgates))
     for (pulse_idx, subgate) in enumerate(subgates)
-        phase_offset = (pulse_idx - 1) * phase_error / 2.0
+        accumulated = (pulse_idx - 1)
         intensity = I_pi2 * (2.0 * subgate.theta / π) * omega_ratio^2
+        net_phase = accumulated * (relative_phase - phase_drift)
         pulses[pulse_idx] = make_ms_pulse(
             t,
             f_cl,
             Δ,
             intensity,
-            2.0 * subgate.phi + phase_offset,
-            phase_offset,
+            subgate.phi + net_phase,
+            subgate.phi,
         )
     end
     return pulses
@@ -167,24 +169,42 @@ function refine_bell_ms_sequence_omega_ratio(t, f_cl, Δ, I_pi2,
 end
 
 function Q_ms_sequence_det(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
-                           subgates::AbstractVector{<:MSSubgate})::Float64
-    pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates)
+                           subgates::AbstractVector{<:MSSubgate};
+                           relative_phase::Float64=0.0,
+                           phase_drift::Float64=0.0)::Float64
+    pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
+                                           relative_phase=relative_phase,
+                                           phase_drift=phase_drift)
     rho = reduced_density_ms_sequence(pulses)
     return bell_fidelity_phi_plus(rho)
 end
 
 function Q_ms_sequence(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
                        subgates::AbstractVector{<:MSSubgate};
-                       N::Int=400)::Float64
-    pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates)
+                       N::Int=400,
+                       expected_gg::Float64=NaN,
+                       expected_ee::Float64=NaN,
+                       relative_phase::Float64=0.0,
+                       phase_drift::Float64=0.0)::Float64
+    pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
+                                           relative_phase=relative_phase,
+                                           phase_drift=phase_drift)
     pops = populations_ms_sequence(pulses)
     weights = Float64[max(pops.gg, 0.0), max(pops.ee, 0.0),
                       max(pops.eg, 0.0), max(pops.ge, 0.0)]
     samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
-    even_count = count(s -> s == 1 || s == 2, samples)
-    return even_count / N
+    P_SS = count(==(1), samples) / N
+    P_DD = count(==(2), samples) / N
+    if !isnan(expected_gg)
+        return 1.0 - (abs(expected_gg - P_SS) + abs(expected_ee - P_DD))
+    end
+    return P_SS + P_DD
 end
 
 function sequence_C_subgates()
-    return MSSubgate[]
+    return [
+        ms_subgate(3π / 16, 0.0),
+        ms_subgate(π / 4, 0.0),
+        ms_subgate(5π / 16, 0.0),
+    ]
 end

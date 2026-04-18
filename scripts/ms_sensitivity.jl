@@ -30,11 +30,14 @@ const SEARCH_SEQUENCE_STYLE = :dashdot
 const SEARCH_RESULT_PATH = joinpath(@__DIR__, "..", "data", "ms_sequence_search_result.jl")
 
 function build_sequence(spec, t, f_cl, Δ, I_pi2;
-                        phase_error::Float64=0.0,
-                        omega_ratio::Float64=1.0)
+                        omega_ratio::Float64=1.0,
+                        relative_phase::Float64=0.0,
+                        phase_drift::Float64=0.0)
     return CC.build_closed_loop_ms_sequence(
         t, f_cl, Δ, I_pi2, spec.subgates;
-        phase_error=phase_error, omega_ratio=omega_ratio)
+        omega_ratio=omega_ratio,
+        relative_phase=relative_phase,
+        phase_drift=phase_drift)
 end
 
 function scan_sequence(make_pulses, grid)
@@ -54,8 +57,8 @@ scan_rabi(Ω_ratios, t, f_cl, Δ, I0, spec) = scan_sequence(Ω_ratios) do r
     build_sequence(spec, t, f_cl, Δ, I0; omega_ratio=r)
 end
 
-scan_phase(Δφ_grid, t, f_cl, Δ, I, spec) = scan_sequence(Δφ_grid) do Δφ
-    build_sequence(spec, t, f_cl, Δ, I; phase_error=Δφ)
+scan_relative_phase(δ_grid, t, f_cl, Δ, I, spec) = scan_sequence(δ_grid) do δ
+    build_sequence(spec, t, f_cl, Δ, I; relative_phase=δ)
 end
 
 scan_sideband(Δ_error_grid, t, f_cl, Δ0, I, spec) = scan_sequence(Δ_error_grid) do Δerr
@@ -183,52 +186,21 @@ function main()
         @info "Best distinct non-baseline candidate" score=search_result.best_new.score sequence=describe_subgates(search_result.best_new.subgates)
     end
 
-    rabi_results = [scan_rabi(Ω_ratios, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
-    phase_results = [scan_phase(Δφ_grid, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
-    sideband_results = [scan_sideband(Δ_error_grid, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
-    centerline_results = [scan_centerline(fcl_error_grid, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
+    phase_results = [scan_relative_phase(Δφ_grid, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
 
     CairoMakie.activate!(type="png")
-    fig = Figure(size=(1450, 980), figure_padding=(24, 36, 18, 20))
+    fig = Figure(size=(700, 500), figure_padding=(24, 36, 18, 20))
     add_legends!(fig, specs)
 
-    ax_rabi = Axis(fig[1, 1];
-        xlabel="Ω / Ω_opt",
+    ax_phase = Axis(fig[1, 1];
+        xlabel="Relative phase δ (π)",
         ylabel="Expectation value",
         xlabelpadding=10,
         ylabelpadding=10,
-        title="Rabi Error",
-    )
-    ax_phase = Axis(fig[1, 2];
-        xlabel="Phase Δϕ (π)",
-        ylabel="Expectation value",
-        xlabelpadding=10,
-        ylabelpadding=10,
-        title="Phase Error",
-    )
-    ax_sideband = Axis(fig[2, 1];
-        xlabel="Sideband detuning error (2π kHz)",
-        ylabel="Expectation value",
-        xlabelpadding=10,
-        ylabelpadding=10,
-        title="Sideband Detuning Error",
-    )
-    ax_centerline = Axis(fig[2, 2];
-        xlabel="Center line error (2π kHz)",
-        ylabel="Expectation value",
-        xlabelpadding=10,
-        ylabelpadding=10,
-        title="Center Line Error",
+        title="Relative Phase Error (φ₁ − φ₂)",
     )
 
-    draw_scan!(ax_rabi, Ω_ratios, rabi_results, specs)
     draw_scan!(ax_phase, Δφ_grid ./ π, phase_results, specs)
-    draw_scan!(ax_sideband, Δ_error_grid ./ 1e3, sideband_results, specs)
-    draw_scan!(ax_centerline, fcl_error_grid ./ 1e3, centerline_results, specs)
-
-    colgap!(fig.layout, 26)
-    rowgap!(fig.layout, 20)
-    resize_to_layout!(fig)
 
     outdir = joinpath(@__DIR__, "..", "figures")
     mkpath(outdir)

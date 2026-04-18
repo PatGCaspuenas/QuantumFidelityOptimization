@@ -1,0 +1,41 @@
+=== BENCHMARK RESULTS ===
+Optimization mode: 3ms_balance, objective: 3ms_balance, 4D: false, maximize: true
+N_shots = 50, noise model = binomial
+Fixed α = 1.5, κ = 1.9
+Number of simulations: 5, n_iter = 120, n_restarts = 6
+Fidelity threshold: Q* = 0.98
+use_variable_mode = false
+Elapsed time: 0:09:09
+
+=== RESULTS SUMMARY ===
+Best Q_det = 0.5273048928622119 (Simulation 5, Seed 909858, Iterations 120)
+Average Q_det = 0.5047241941237793 ± 0.014140489344664466
+Median Q_det = 0.49887163203735957
+Min Q_det = 0.49034196446739114
+Max Q_det = 0.5273048928622119
+Average iterations = 93.4 ± 38.94611662284187
+Median iterations = 120.0
+
+Total training points across all sims = 991
+
+Best noisy Q (last obs) = 0.9
+Best GP-recommended Q   = 0.86
+Best final GP hyperparameters:
+  ℓ  = [0.3101, 0.335, 1.5]
+  σf = 1.3252
+  c  = 2.1885
+Best u_rec = [-0.29338541540181784, 0.1287704266712684, 0.9408326598862741]
+
+=== BEST RESULT PHYSICAL PARAMETERS ===
+Recommended f_cl = 4.1115503520205794e14
+Recommended f_sb = 3.0116181769057205e6
+Recommended A    = 1.252243345059563e6
+Baseline   f_cl = 4.1115503520574475e14, f_sb = 3.01e6, A = 1.053929151644826e6
+
+=== All Results ===
+Sim	Seed	Iterations	TotalShots	NTrain	Q_det	Q_noisy	Q_rec	ℓ1	ℓ2	ℓ3	σf	c
+1	714078	120	12850	252	0.5083508837080029	0.8	0.94	0.6247	1.5	1.5	1.917	1.5422
+2	849665	120	12750	250	0.49034196446739114	0.62	0.64	0.2815	0.2226	1.5	1.3064	1.7659
+3	670733	73	7950	157	0.49887163203735957	0.6000000000000001	0.98	0.3953	0.1634	1.4999	1.3381	1.3495
+4	400294	34	4100	80	0.49875159754393067	0.74	0.98	0.272	0.8417	1.4999	1.1212	1.5759
+5	909858	120	12800	252	0.5273048928622119	0.9	0.86	0.3101	0.335	1.5	1.3252	2.1885

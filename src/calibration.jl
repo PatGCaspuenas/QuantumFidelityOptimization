@@ -241,25 +241,28 @@ end
 
 function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
                  N::Int=1000, numMS::Int=2,
-                 phi_1::Float64=0.0, phi_2::Float64=0.0)::Float64
+                 relative_phase::Float64=0.0, phase_drift::Float64=0.0)::Float64
 
     setup = build_chamber()
-    configure_lasers!(setup, f_cl, Δ, I, phi_1=phi_1, phi_2=phi_2)
-
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
-
-    h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
     tout = Float64[0.0, t]
-    _, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
+    state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
 
-    for _ in 2:numMS  # no-op when numMS == 1
-        _, sol = timeevolution.schroedinger_dynamic(tout, sol[end], h)
+    for gate_idx in 1:numMS
+        accumulated = (gate_idx - 1)
+        net_phase = accumulated * (relative_phase - phase_drift)
+        configure_lasers!(setup, f_cl, Δ, I,
+                          phi_1=net_phase,
+                          phi_2=0.0)
+        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
+        _, sol = timeevolution.schroedinger_dynamic(tout, state, h)
+        state = sol[end]
     end
 
-    SS = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
-    DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
-    SD = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
-    DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
+    SS = real(expect(ionprojector(chamber, "S", "S"), state))
+    DD = real(expect(ionprojector(chamber, "D", "D"), state))
+    SD = real(expect(ionprojector(chamber, "S", "D"), state))
+    DS = real(expect(ionprojector(chamber, "D", "S"), state))
 
     # Define success predicate based on the number of gates (zero-alloc)
     success_pred = if isodd(numMS)
@@ -280,25 +283,30 @@ end
 
 function Q_varMS_balance(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
                          N::Int=1000, numMS::Int=3,
-                         phi_1::Float64=0.0, phi_2::Float64=0.0)::Float64
+                         relative_phase::Float64=0.0, phase_drift::Float64=0.0)::Float64
     setup = build_chamber()
-    configure_lasers!(setup, f_cl, Δ, I, phi_1=phi_1, phi_2=phi_2)
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
-    h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
     tout = Float64[0.0, t]
-    _, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
-    for _ in 2:numMS
-        _, sol = timeevolution.schroedinger_dynamic(tout, sol[end], h)
+    state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
+    for gate_idx in 1:numMS
+        accumulated = (gate_idx - 1)
+        net_phase = accumulated * (relative_phase - phase_drift)
+        configure_lasers!(setup, f_cl, Δ, I,
+                          phi_1=net_phase,
+                          phi_2=0.0)
+        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
+        _, sol = timeevolution.schroedinger_dynamic(tout, state, h)
+        state = sol[end]
     end
-    SS = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
-    DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
-    SD = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
-    DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
+    SS = real(expect(ionprojector(chamber, "S", "S"), state))
+    DD = real(expect(ionprojector(chamber, "D", "D"), state))
+    SD = real(expect(ionprojector(chamber, "S", "D"), state))
+    DS = real(expect(ionprojector(chamber, "D", "S"), state))
     weights = Float64[max(SS, 0.0), max(DD, 0.0), max(SD, 0.0), max(DS, 0.0)]
     samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
     P_SS = count(==(1), samples) / N
     P_DD = count(==(2), samples) / N
-    return 1.0 - abs(P_SS - P_DD)
+    return 1.0 - (abs(0.5 - P_SS) + abs(0.5 - P_DD))
 end
 
 """

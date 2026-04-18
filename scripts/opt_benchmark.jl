@@ -4,6 +4,7 @@ Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
 using Random
 using Distributed
 using Statistics
+using Printf
 
 if nprocs() == 1
     n_workers_cfg = get(ENV, "BO_N_WORKERS", "")
@@ -64,7 +65,7 @@ try
     # Objective mode:
     #   "2ms"             → Q_varMS(numMS=2), maximize F                     (default, original behavior)
     #   "2ms_log"         → Q_varMS(numMS=2), minimize log10(1-F)
-    #   "3ms_balance"     → Q_varMS_balance(numMS=3), maximize 1-|P00-P11|
+    #   "3ms_balance"     → Q_varMS_balance(numMS=3), maximize 1-|½-P_SS|-|½-P_DD|
     #   "3ms_balance_log" → Q_varMS_balance(numMS=3), minimize log10(1-F)
     #   "jacobian"        → Q_ms_sequence with searched subgates, maximize
     objective_mode   =           get(ENV, "BO_OBJECTIVE_MODE", "2ms")  # BO_OBJECTIVE_MODE=2ms/2ms_log/...
@@ -82,16 +83,21 @@ try
     span_fcl = span_kHz * 1e3 * 2π
     span_fsb = span_kHz * 1e3 * 2π
     span_A = 1.2 * A0 - A0
-    span_phi = π / 2
+    span_phi = π / 10
 
-    # Load Jacobian-searched subgates if needed
-    _jacobian_subgates = if objective_mode == "jacobian"
+    # Load Jacobian-searched subgates and compute expected populations if needed
+    _jacobian_subgates, _jac_expected_gg, _jac_expected_ee = if objective_mode == "jacobian"
         _search_path = joinpath(@__DIR__, "..", "data", "ms_sequence_search_result.jl")
         isfile(_search_path) || error("Search result not found: $_search_path — run scripts/ms_sequence_search.jl first")
         _raw = include(_search_path)
-        [CalibrationCode.MSSubgate(sg.theta, sg.phi) for sg in _raw.best_overall.subgates]
+        _subs = [CalibrationCode.MSSubgate(sg.theta, sg.phi) for sg in _raw.best_overall.subgates]
+        _I_center = Float64(_raw.I_center)
+        _pulses = CalibrationCode.build_closed_loop_ms_sequence(t, f_cl0, f_sb0, _I_center, _subs)
+        _pops = CalibrationCode.populations_ms_sequence(_pulses)
+        println("Jacobian sequence expected pops: gg=$(round(_pops.gg, digits=6)), ee=$(round(_pops.ee, digits=6)), odd=$(round(_pops.eg + _pops.ge, digits=6))")
+        (_subs, Float64(_pops.gg), Float64(_pops.ee))
     else
-        CalibrationCode.MSSubgate[]
+        (CalibrationCode.MSSubgate[], NaN, NaN)
     end
 
     @everywhere const t = $t
@@ -107,6 +113,10 @@ try
     @everywhere const _use_4d = $use_4d
     @everywhere const _is_log_mode = $_is_log_mode
     @everywhere const _jac_subgates = $_jacobian_subgates
+    @everywhere const _jac_exp_gg = $_jac_expected_gg
+    @everywhere const _jac_exp_ee = $_jac_expected_ee
+
+    @everywhere const _phase_drift = Ref(0.0)
 
     @everywhere function u_to_params(u)
         fcl = f_cl0 + span_fcl * u[1]
@@ -121,12 +131,15 @@ try
 
     @everywhere function _eval_raw(fcl, fsb, A, N::Int; phi::Float64=0.0)
         if _objective_mode == "3ms_balance" || _objective_mode == "3ms_balance_log"
-            return CalibrationCode.Q_varMS_balance(t, fcl, fsb, A; N=N, numMS=3)
+            return CalibrationCode.Q_varMS_balance(t, fcl, fsb, A; N=N, numMS=3,
+                relative_phase=phi, phase_drift=_phase_drift[])
         elseif _objective_mode == "jacobian"
-            return clamp(CalibrationCode.Q_ms_sequence(t, fcl, fsb, A, _jac_subgates; N=N), 0.0, 1.0)
+            return clamp(CalibrationCode.Q_ms_sequence(t, fcl, fsb, A, _jac_subgates;
+                N=N, expected_gg=_jac_exp_gg, expected_ee=_jac_exp_ee,
+                relative_phase=phi, phase_drift=_phase_drift[]), 0.0, 1.0)
         elseif _use_4d
-            subgates = [CalibrationCode.ms_subgate(π/2, 0.0), CalibrationCode.ms_subgate(π/2, phi)]
-            return clamp(CalibrationCode.Q_ms_sequence(t, fcl, fsb, A, subgates; N=N), 0.0, 1.0)
+            return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=2,
+                relative_phase=phi, phase_drift=_phase_drift[])
         else
             if optimize_det
                 return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
@@ -215,8 +228,15 @@ try
     results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
         try
             seed = _random_seeds[sim_idx]
-            println("Starting simulation $sim_idx...")
+            if _use_4d
+                _phase_drift[] = (rand(MersenneTwister()) * 2.0 - 1.0) * span_phi
+                println("Starting simulation $sim_idx (phase_drift = $(round(_phase_drift[], digits=4)))...")
+            else
+                _phase_drift[] = 0.0
+                println("Starting simulation $sim_idx...")
+            end
             flush(stdout)
+            local drift_val = _phase_drift[]
             res = CalibrationCode.bayesopt_ucb_threshold(Q_fun;
                 bounds=bounds,
                 n_shots=N_shots,
@@ -238,6 +258,7 @@ try
 
             _params = u_to_params(res.x_rec)
             fcl, fsb, A = _params[1], _params[2], _params[3]
+            phi_rec = _use_4d ? _params[4] : 0.0
             Q_det_val = clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
             n_iters = res.n_iter_actual > 0 ? res.n_iter_actual : _n_iter
 
@@ -247,7 +268,11 @@ try
             total_shots_used = res.total_shots
             n_train = length(res.σy)
 
-            println("Simulation $sim_idx → Q_det = $(round(Q_det_val, digits=4)), Q_rec = $(round(Q_rec_val, digits=4)), iterations: $n_iters, total_shots: $total_shots_used")
+            if _use_4d
+                println("Simulation $sim_idx → Q_det = $(round(Q_det_val, digits=4)), Q_rec = $(round(Q_rec_val, digits=4)), phi_rec = $(round(phi_rec, digits=4)), drift = $(round(drift_val, digits=4)), iterations: $n_iters, total_shots: $total_shots_used")
+            else
+                println("Simulation $sim_idx → Q_det = $(round(Q_det_val, digits=4)), Q_rec = $(round(Q_rec_val, digits=4)), iterations: $n_iters, total_shots: $total_shots_used")
+            end
             flush(stdout)
 
             (
@@ -260,6 +285,8 @@ try
                 n_iterations=n_iters,
                 total_shots=total_shots_used,
                 n_train=n_train,
+                phase_drift=drift_val,
+                phi_rec=phi_rec,
                 ℓ_final=res.ℓ_final,
                 σf_final=res.σf_final,
                 c_final=res.c_final,
@@ -314,13 +341,13 @@ try
     _best_params = u_to_params(best_result.x_rec)
     fcl_rec, fsb_rec, A_rec = _best_params[1], _best_params[2], _best_params[3]
     println("\n=== BEST RESULT PHYSICAL PARAMETERS ===")
-    println("Recommended f_cl = ", fcl_rec)
-    println("Recommended f_sb = ", fsb_rec)
-    println("Recommended A    = ", A_rec)
+    @printf("Recommended f_cl = %.15e\n", fcl_rec)
+    @printf("Recommended f_sb = %.15e\n", fsb_rec)
+    @printf("Recommended A    = %.15e\n", A_rec)
     if use_4d
         println("Recommended phi  = ", _best_params[4])
     end
-    println("Baseline   f_cl = ", f_cl0, "  f_sb = ", f_sb0, "  A = ", A0)
+    @printf("Baseline   f_cl = %.15e  f_sb = %.15e  A = %.15e\n", f_cl0, f_sb0, A0)
 
     elapsed_seconds = time() - start_time
     elapsed_total = round(Int, elapsed_seconds)
@@ -361,18 +388,20 @@ try
         println(io, "Best u_rec = $(best_result.x_rec)")
         println(io, "")
         println(io, "=== BEST RESULT PHYSICAL PARAMETERS ===")
-        println(io, "Recommended f_cl = $fcl_rec")
-        println(io, "Recommended f_sb = $fsb_rec")
-        println(io, "Recommended A    = $A_rec")
+        @printf(io, "Recommended f_cl = %.15e\n", fcl_rec)
+        @printf(io, "Recommended f_sb = %.15e\n", fsb_rec)
+        @printf(io, "Recommended A    = %.15e\n", A_rec)
         use_4d && println(io, "Recommended phi  = $(_best_params[4])")
-        println(io, "Baseline   f_cl = $f_cl0, f_sb = $f_sb0, A = $A0")
+        @printf(io, "Baseline   f_cl = %.15e  f_sb = %.15e  A = %.15e\n", f_cl0, f_sb0, A0)
         println(io, "")
         println(io, "=== All Results ===")
         ℓ_headers = join(["ℓ$i" for i in 1:length(bounds)], "\t")
-        println(io, "Sim\tSeed\tIterations\tTotalShots\tNTrain\tQ_det\tQ_noisy\tQ_rec\t$ℓ_headers\tσf\tc")
+        phase_headers = use_4d ? "\tdrift\tphi_rec\tdelta_phi" : ""
+        println(io, "Sim\tSeed\tIterations\tTotalShots\tNTrain\tQ_det\tQ_noisy\tQ_rec\t$ℓ_headers\tσf\tc$phase_headers")
         for r in results_grid
             ℓ_str = join(round.(r.ℓ_final, digits=4), "\t")
-            println(io, "$(r.sim_idx)\t$(r.seed)\t$(r.n_iterations)\t$(r.total_shots)\t$(r.n_train)\t$(r.Q_det)\t$(r.Q_noisy)\t$(r.Q_rec)\t$ℓ_str\t$(round(r.σf_final,digits=4))\t$(round(r.c_final,digits=4))")
+            phase_str = use_4d ? "\t$(round(r.phase_drift, digits=6))\t$(round(r.phi_rec, digits=6))\t$(round(r.phi_rec - r.phase_drift, digits=6))" : ""
+            println(io, "$(r.sim_idx)\t$(r.seed)\t$(r.n_iterations)\t$(r.total_shots)\t$(r.n_train)\t$(r.Q_det)\t$(r.Q_noisy)\t$(r.Q_rec)\t$ℓ_str\t$(round(r.σf_final,digits=4))\t$(round(r.c_final,digits=4))$phase_str")
         end
     end
 
