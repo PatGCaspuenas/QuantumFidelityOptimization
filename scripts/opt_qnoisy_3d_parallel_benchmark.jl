@@ -87,6 +87,9 @@ try
     # sigma_levels for :s2 mode (archived defaults: N≈50,100,278,500)
     _sigma_levels_str    = get(ENV, "BO_SIGMA_LEVELS", "0.1412,0.1,0.06,0.04472")
     sigma_levels         = parse.(Float64, split(_sigma_levels_str, ","))  # BO_SIGMA_LEVELS=0.1412,0.1,0.06,0.04472
+    lcb_stop             = get(ENV, "BO_LCB_STOP", "false") == "true"  # BO_LCB_STOP=true/false (whether to use LCB-based stopping criterion instead of thresholding)
+    M_acq                 = parse(Int,   get(ENV, "BO_M_ACQ", "5000")) # BO_M_ACQ=1000 (number of acquisition candidates per BO step)
+    random_acq              = get(ENV, "BO_RANDOM_ACQ", "false") == "true"  # BO_RANDOM_ACQ=true/false (whether to sample acquisition candidates randomly instead of with Sobol)
     # ============================================================
 
     t = 100.0
@@ -246,6 +249,10 @@ try
     _sigma_levels         = sigma_levels
     _fidelity_threshold_vn = fidelity_threshold_vn
 
+    _random_acq = random_acq
+    _lcb_stop = lcb_stop
+    _M_acq = M_acq
+
     results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
         try
             seed = _random_seeds[sim_idx]
@@ -285,6 +292,9 @@ try
                 sigma_levels=_sigma_levels,
                 fidelity_threshold_vn=_fidelity_threshold_vn,
                 use_log_fidelity=use_log_fidelity,
+                lcb_stop=_lcb_stop,
+                M_acq=_M_acq,
+                random_acq=_random_acq,
             )
 
             # Always calculate true Q_det in original scale for reporting

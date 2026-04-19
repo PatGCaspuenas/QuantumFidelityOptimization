@@ -14,6 +14,10 @@ try
     @everywhere begin
         import Pkg
         Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+        
+        using LinearAlgebra
+        LinearAlgebra.BLAS.set_num_threads(1) # Prevent BLAS thread thrashing on workers
+        
         include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
         using Random
 
@@ -34,48 +38,44 @@ try
                           f_sb0 + span_fsb * u[2],
                           A0 + span_A * u[3])
                           
+        # Define the N values we want to sweep over
+        const N_vals = 50:50:1000
+
         # Evaluation function for the worker
         function evaluate_point(pt)
-            plane_name, slice_val, u1, u2, u3 = pt
+            u1, u2 = pt
+            u3 = 0.0 # Fixed Z-plane (A at baseline)
             fcl, fsb, A = u_to_params([u1, u2, u3])
             
-            # Deterministic and noisy Q
-            # Q_det_val = clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
-            Q_det_val = 0.0
-            Q_varMS_val = CalibrationCode.Q_varMS(t, fcl, fsb, A; N=50, numMS=2)
+            # Deterministic Q
+            Q_det_val = clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
             
-            return (plane_name, slice_val, u1, u2, u3, Q_det_val, Q_varMS_val)
+            # Noisy Q for each N configuration
+            Q_noisy_vals = Float64[]
+            for N in N_vals
+                # SWAPPED: Now using Q_noisy instead of Q_varMS
+                push!(Q_noisy_vals, CalibrationCode.Q_noisy(t, fcl, fsb, A; N=N))
+            end
+            
+            return (u1, u2, Q_det_val, Q_noisy_vals)
         end
     end
 
     # ============================================================
     # GRID CONFIGURATION
     # ============================================================
-    grid_res = 30                              # 30x30 grid points per 2D slice
+    grid_res = 30                              # 30x30 grid points
     u_grid = range(-1.0, 1.0, length=grid_res) # The bounds of your normalized space
-    slice_vals = [-1.0, -0.5, 0.0, 0.5, 1.0]   # Positions of the slice planes
-    output_file_name = "response_surface_slices_N50.csv"
+    output_file_name = "response_surface_animation_data_1gate.csv"
     
-    println("=== Generating 2D Slices for the Response Surface ===")
-    println("Grid resolution per slice: $grid_res x $grid_res")
-    println("Slice plane locations: ", slice_vals)
+    println("=== Generating 2D Z=0 Slice for N-Shot Animation ===")
+    println("Grid resolution: $grid_res x $grid_res")
+    println("Sweeping N from $(first(N_vals)) to $(last(N_vals)) in steps of $(step(N_vals))")
     
-    # 1. Build the list of all points to evaluate
+    # 1. Build the list of all XY points to evaluate (Z/u3 is fixed at 0.0 internally)
     eval_points = []
-
-    # XY Planes (Fix u3/A, Vary u1/fcl and u2/fsb)
-    for u3 in slice_vals, u1 in u_grid, u2 in u_grid
-        push!(eval_points, ("XY", u3, u1, u2, u3))
-    end
-
-    # XZ Planes (Fix u2/fsb, Vary u1/fcl and u3/A)
-    for u2 in slice_vals, u1 in u_grid, u3 in u_grid
-        push!(eval_points, ("XZ", u2, u1, u2, u3))
-    end
-
-    # YZ Planes (Fix u1/fcl, Vary u2/fsb and u3/A)
-    for u1 in slice_vals, u2 in u_grid, u3 in u_grid
-        push!(eval_points, ("YZ", u1, u1, u2, u3))
+    for u1 in u_grid, u2 in u_grid
+        push!(eval_points, (u1, u2))
     end
 
     total_points = length(eval_points)
@@ -85,7 +85,7 @@ try
     start_time = time()
 
     # 2. Evaluate in parallel
-    results_grid = pmap(evaluate_point, eval_points; batch_size=50)
+    results_grid = pmap(evaluate_point, eval_points; batch_size=20)
 
     elapsed = time() - start_time
     println("Evaluation finished in $(round(elapsed, digits=2)) seconds.")
@@ -94,20 +94,25 @@ try
     output_file = joinpath(@__DIR__, "..", "data", output_file_name)
     println("Writing data to $output_file...")
     
-    # Using raw file I/O to avoid requiring CSV.jl / DataFrames.jl as a dependency
+    # Using raw file I/O
     open(output_file, "w") do io
-        # Header
-        println(io, "plane,slice_fixed_val,u1_fcl,u2_fsb,u3_A,Q_det,Q_varMS")
+        # Dynamic Header based on N_vals
+        n_headers = join(["Q_noisy_N$N" for N in N_vals], ",")
+        println(io, "u1_fcl,u2_fsb,Q_det,$n_headers")
         
         for res in results_grid
-            # Format row: (plane, slice_val, u1, u2, u3, Q_det, Q_varMS)
-            str_row = @sprintf("%s,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f", 
-                               res[1], res[2], res[3], res[4], res[5], res[6], res[7])
+            u1, u2, Q_det_val, Q_noisy_vals = res
+            
+            # Format the array of noisy values into a comma-separated string
+            noisy_vals_str = join([@sprintf("%.6f", val) for val in Q_noisy_vals], ",")
+            
+            # Format row: (u1, u2, Q_det, Q_noisy_N50, Q_noisy_N100, ...)
+            str_row = @sprintf("%.4f,%.4f,%.6f,%s", u1, u2, Q_det_val, noisy_vals_str)
             println(io, str_row)
         end
     end
 
-    println("\nDone! Data successfully structured for plotting.")
+    println("\nDone! Data successfully structured for animation plotting.")
 
 catch e
     println("ERROR generating slices: ")

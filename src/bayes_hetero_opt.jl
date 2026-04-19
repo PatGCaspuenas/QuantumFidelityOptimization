@@ -141,6 +141,94 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
         αtmp = F \ ystd
         return 0.5 * dot(ystd, αtmp) + sum(log, diag(F.L)) + 0.5 * n * log(2π)
     end
+    # Combined Objective and Gradient function for Optim
+    function fg!(F, G, θ::Vector{Float64})
+        ℓ  = use_fixed_ℓ ? fixed_ℓ : exp.(θ[1:d])
+        σf = use_fixed_ℓ ? exp(θ[1]) : exp(θ[d+1])
+        c  = learn_noise_scale ? (use_fixed_ℓ ? exp(θ[2]) : exp(θ[d+2])) : 1.0
+
+        K = buildK(X, ℓ, σf)
+        K_pure = G !== nothing ? copy(K) : K   # save pure kernel before noise+cholesky
+        Σ = zeros(Float64, n)
+        @inbounds for i in 1:n
+            si = max(c * σstd0[i], 1e-10)
+            Σ[i] = si^2 + jitter
+            K[i, i] += Σ[i]
+        end
+
+        cholF = try
+            cholesky!(Symmetric(K))
+        catch
+            if G !== nothing
+                fill!(G, 0.0)
+            end
+            return Inf
+        end
+
+        L = cholF.L
+        α_tmp = cholF \ ystd
+
+        nlml_val = 0.0
+        if F !== nothing
+            nlml_val = 0.5 * dot(ystd, α_tmp) + sum(log, diag(L)) + 0.5 * n * log(2π)
+        end
+
+        if G !== nothing
+            fill!(G, 0.0)
+
+            idx_σf = use_fixed_ℓ ? 1 : d + 1
+            idx_c  = use_fixed_ℓ ? 2 : d + 2
+
+            # Stable gradient: G[j] = 0.5*(α'dK_j α − tr(K⁻¹ dK_j))
+            # tr(K⁻¹ dK_j) = tr(Linv dK_j Linvᵀ) = sum((Linv*dK_j) .* Linv)
+            # Linv computed once (1 TRSM); per-hyperparameter cost is 1 GEMM (fast).
+            # Diagonal dK_c handled via column scaling → O(n²) instead of O(n³).
+            Linv = cholF.L \ Matrix{Float64}(I, n, n)
+
+            dK_buf = Matrix{Float64}(undef, n, n)
+
+            # --- σf: dK/d(log σf) = 2 * K_pure ---
+            @inbounds for j in 1:n, i in 1:n
+                dK_buf[i, j] = 2.0 * K_pure[i, j]
+            end
+            v = dK_buf * α_tmp
+            G[idx_σf] = 0.5 * (dot(α_tmp, v) - sum((Linv * dK_buf) .* Linv))
+
+            # --- lengthscales: dK/d(log ℓk) ---
+            if !use_fixed_ℓ
+                for k in 1:d
+                    fill!(dK_buf, 0.0)
+                    @inbounds for jj in 1:n
+                        for ii in 1:jj-1
+                            r2 = 0.0
+                            for kk in 1:d
+                                u = (X[kk, ii] - X[kk, jj]) / ℓ[kk]; r2 += u*u
+                            end
+                            r = sqrt(r2)
+                            a = sqrt(3.0) * r
+                            exp_a = exp(-a)
+                            dist_k = X[k, ii] - X[k, jj]
+                            val = (σf^2) * 3.0 * exp_a * dist_k^2 / ℓ[k]^2
+                            dK_buf[ii, jj] = val
+                            dK_buf[jj, ii] = val
+                        end
+                    end
+                    v = dK_buf * α_tmp
+                    G[k] = 0.5 * (dot(α_tmp, v) - sum((Linv * dK_buf) .* Linv))
+                end
+            end
+
+            # --- c: dK/d(log c) = diag(2c²σstd0²) — diagonal, O(n²) ---
+            if learn_noise_scale
+                d_vec = 2.0 .* (c^2) .* σstd0.^2    # diagonal entries
+                v_c   = d_vec .* α_tmp               # diag(d)*α, O(n)
+                # Linv * diag(d) = scale columns of Linv by d_vec → O(n²)
+                G[idx_c] = 0.5 * (dot(α_tmp, v_c) - sum((Linv .* d_vec') .* Linv))
+            end
+        end
+
+        return F !== nothing ? nlml_val : 0.0
+    end
 
     # starting point
     _θ_ε = 1e-4  # small inset from boundary to avoid Fminbox boundary rejection
@@ -248,6 +336,59 @@ function predict_latent(gp::HeteroGP, x::Vector{Float64})
     return μ, s2
 end
 
+"""
+    predict_latent_grad(gp, x) -> (μ, s2, dμ)
+
+Posterior mean, variance, and analytical gradient of the mean w.r.t. x.
+
+Gradient derivation for Matérn 3/2:
+  k(x,z) = σf²(1+√3r)exp(-√3r),  r = √(Σⱼ((xⱼ-zⱼ)/ℓⱼ)²)
+  dk/dxⱼ = -3σf² exp(-√3r)(xⱼ-zⱼ)/ℓⱼ²
+  dμ/dxⱼ = yσ Σᵢ αᵢ dk(x,Xᵢ)/dxⱼ
+"""
+function predict_latent_grad(gp::HeteroGP, x::Vector{Float64})
+    X    = gp.X
+    d, n = size(X)
+    σf2  = gp.σf^2
+
+    k       = Vector{Float64}(undef, n)
+    exp_neg = Vector{Float64}(undef, n)   # exp(-√3 rᵢ) per training point
+
+    @inbounds for i in 1:n
+        r2 = 0.0
+        for j in 1:d
+            u = (x[j] - X[j,i]) / gp.ℓ[j]
+            r2 += u*u
+        end
+        r = sqrt(r2)
+        a = sqrt(3.0) * r
+        e = exp(-a)
+        k[i]       = σf2 * (1.0 + a) * e
+        exp_neg[i] = e
+    end
+
+    μstd  = dot(k, gp.α)
+    v     = gp.L \ k
+    kxx   = matern32(x, x, gp.ℓ, gp.σf)
+    s2std = max(kxx - dot(v, v), 0.0)
+
+    μ  = gp.yμ + gp.yσ * μstd
+    s2 = (gp.yσ^2) * s2std
+
+    # dμ/dxⱼ = yσ Σᵢ αᵢ (-3σf² exp(-√3rᵢ)(xⱼ-Xⱼᵢ)/ℓⱼ²)
+    dμ = zeros(Float64, d)
+    @inbounds for i in 1:n
+        ai = gp.α[i]
+        iszero(ai) && continue
+        coef = -3.0 * σf2 * exp_neg[i] * ai * gp.yσ
+        for j in 1:d
+            dμ[j] += coef * (x[j] - X[j,i]) / (gp.ℓ[j]^2)
+        end
+    end
+
+    return μ, s2, dμ
+end
+
 # -------------------------
 # BO structures + utilities
 # -------------------------
@@ -339,55 +480,65 @@ end
 
 
 """
-    recommend_mean(gp, bounds; M, rng) -> (x_rec, m_rec, s_rec)
+    recommend_mean(gp, bounds; M, k_refine, rng) -> (x_rec, m_rec, s_rec)
 
 Find the point with highest GP posterior mean within `bounds`.
 
-Global search over `M` random candidates, then local refinement with
-bounded L-BFGS from the best candidate.
+Global search over `M` random candidates keeping the top `k_refine` best,
+then local L-BFGS refinement with analytical gradients from each of those candidates.
 
 Returns `(x_rec, m_rec, s_rec)` where `m_rec` is the posterior mean
-and `s_rec` is the posterior std at `x_rec` (useful for LCB stopping checks).
+and `s_rec` is the posterior std at `x_rec`.
 """
-function recommend_mean(gp::HeteroGP, bounds; M::Int=20000, rng::Random.AbstractRNG=Random.default_rng())
+function recommend_mean(gp::HeteroGP, bounds; M::Int=20000, k_refine::Int=1,
+                        rng::Random.AbstractRNG=Random.default_rng())
     M ≥ 1 || throw(ArgumentError("M must be ≥ 1"))
     lb = Float64[b[1] for b in bounds]
     ub = Float64[b[2] for b in bounds]
+    k_refine = min(k_refine, M)
 
-    # Global random search
-    best_x = _rand_in_box(rng, lb, ub)
-    μ0, s2_0 = predict_latent(gp, best_x)
-    best_m = μ0
-    best_s = sqrt(max(s2_0, 0.0))
+    # Global random search — maintain top k_refine candidates
+    top_xs = [_rand_in_box(rng, lb, ub) for _ in 1:k_refine]
+    top_ms = [predict_latent(gp, top_xs[i])[1] for i in 1:k_refine]
+    worst_idx = argmin(top_ms)
+    min_top   = top_ms[worst_idx]
+
     for _ in 1:M
         x = _rand_in_box(rng, lb, ub)
-        μ, s2 = predict_latent(gp, x)
-        if μ > best_m
-            best_m = μ
-            best_s = sqrt(max(s2, 0.0))
-            best_x = x
+        μ, _ = predict_latent(gp, x)
+        if μ > min_top
+            top_xs[worst_idx] = x
+            top_ms[worst_idx] = μ
+            worst_idx = argmin(top_ms)
+            min_top   = top_ms[worst_idx]
         end
     end
 
-    # Local refinement: bounded L-BFGS with finite-diff gradients.
-    # Refines the best random candidate to sub-grid precision.
-    try
-        res = optimize(x -> begin μ, _ = predict_latent(gp, x); -μ end,
-                       lb, ub, copy(best_x),
-                       Fminbox(LBFGS()),
-                       Optim.Options(iterations=100, g_tol=1e-5, f_abstol=1e-10);
-                       autodiff=:finite)
-        x_ref = Optim.minimizer(res)
-        μ_ref, s2_ref = predict_latent(gp, x_ref)
-        if μ_ref > best_m
-            best_m = μ_ref
-            best_s = sqrt(max(s2_ref, 0.0))
-            best_x = x_ref
-        end
-    catch
-        # If refinement fails (rare), fall back to random-search result
-    end
+    # L-BFGS refinement with analytical gradients from each top-k candidate.
+    # OnceDifferentiable caches the last (f, g!) call, avoiding double GP evaluations.
+    best_idx = argmax(top_ms)
+    best_x = top_xs[best_idx]
+    best_m = top_ms[best_idx]
+    best_s = sqrt(max(predict_latent(gp, best_x)[2], 0.0))
 
+    for x0 in top_xs
+        try
+            res = optimize(x -> begin μ, _ = predict_latent(gp, x); -μ end,
+                        lb, ub, copy(x0),
+                        Fminbox(LBFGS()),
+                        Optim.Options(iterations=100, g_tol=1e-5, f_abstol=1e-10);
+                        autodiff=:finite)
+            x_ref = Optim.minimizer(res)
+            μ_ref, s2_ref = predict_latent(gp, x_ref)
+            if μ_ref > best_m
+                best_m = μ_ref
+                best_s = sqrt(max(s2_ref, 0.0))
+                best_x = x_ref
+            end
+        catch
+            # If refinement fails (rare), fall back to random-search result
+        end
+    end
     return best_x, best_m, best_s
 end
 
@@ -557,7 +708,11 @@ function bayesopt_ucb_threshold(f;
                                ci_z::Float64=1.96,
                                fidelity_threshold_vn::Union{Nothing,Float64}=nothing,
                                acq_n_mode::Symbol=:floor,
-                               use_log_fidelity::Bool=false)
+                               use_log_fidelity::Bool=false,
+                               lcb_stop::Bool=false,
+                               lcb_z::Float64=1.645,
+                               random_acq::Bool=false,
+                               iter_callback::Union{Nothing,Function}=nothing)
 
     _validate_bounds(bounds)
     n_init ≥ 1 || throw(ArgumentError("n_init must be ≥ 1"))
@@ -570,7 +725,7 @@ function bayesopt_ucb_threshold(f;
     min_iter ≥ 0   || throw(ArgumentError("min_iter must be ≥ 0"))
     n_shots ≥ 1   || throw(ArgumentError("n_shots must be ≥ 1"))
     sigma_mode ∈ (:simple, :binomial) || throw(ArgumentError("sigma_mode must be :simple or :binomial"))
-    n_checks ∈ (1, 2) || throw(ArgumentError("n_checks must be 1 or 2"))
+    n_checks ∈ (1, 2, 3) || throw(ArgumentError("n_checks must be 1, 2, or 3"))
     variable_n_mode ∈ (:none, :s2, :mean, :ci, :verify) || throw(ArgumentError("variable_n_mode must be :none, :s2, :mean, :ci, or :verify"))
     acq_n_mode ∈ (:floor, :mean) || throw(ArgumentError("acq_n_mode must be :floor or :mean"))
     n_floor ≥ 1 || throw(ArgumentError("n_floor must be ≥ 1"))
@@ -673,24 +828,32 @@ function bayesopt_ucb_threshold(f;
 
         θ_prev = gp.θ
 
-        acq_pts = acq_sampling === :sobol ?
-            _sobol_in_box(rng_acq, lb, ub, M_acq) :
-            nothing
-
-        best_x  = acq_sampling === :sobol ? acq_pts[:, 1] : _rand_in_box(rng_acq, lb, ub)
+        best_x  = _rand_in_box(rng_acq, lb, ub)
         best_a  = -Inf
         best_s2 = 0.0
         best_mu = 0.0
 
-        for i in 1:M_acq
-            x = acq_sampling === :sobol ? acq_pts[:, i] : _rand_in_box(rng_acq, lb, ub)
-            μ, s2 = predict_latent(gp, x)
-            a = ucb_score(μ, s2, κ)
-            if a > best_a
-                best_a  = a
-                best_x  = x
-                best_s2 = s2
-                best_mu = μ
+        if random_acq
+            # Pure random acquisition: skip UCB maximization, evaluate GP once for variable-N modes.
+            best_mu, best_s2 = predict_latent(gp, best_x)
+            best_a = ucb_score(best_mu, best_s2, κ)
+        else
+            acq_pts = acq_sampling === :sobol ?
+                _sobol_in_box(rng_acq, lb, ub, M_acq) :
+                nothing
+
+            if acq_sampling === :sobol; best_x = acq_pts[:, 1]; end
+
+            for i in 1:M_acq
+                x = acq_sampling === :sobol ? acq_pts[:, i] : _rand_in_box(rng_acq, lb, ub)
+                μ, s2 = predict_latent(gp, x)
+                a = ucb_score(μ, s2, κ)
+                if a > best_a
+                    best_a  = a
+                    best_x  = x
+                    best_s2 = s2
+                    best_mu = μ
+                end
             end
         end
 
@@ -728,8 +891,7 @@ function bayesopt_ucb_threshold(f;
         σy_rec_cur = 0.0
         stop_loop = false
         if variable_n_mode !== :none
-            x_rec_cur, μ_rec, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_rec)
-
+            x_rec_cur, μ_rec, s_rec_cur = recommend_mean(gp, bounds; M=M_rec, rng=rng_rec)
             if variable_n_mode === :s2
                 _, s2_rec = predict_latent(gp, x_rec_cur)
                 n_rec = _sigma_to_n(choose_sigma_threshold(s2_rec, sigma_levels; α=alpha_s2), n_floor, n_max_shots)
@@ -746,7 +908,9 @@ function bayesopt_ucb_threshold(f;
                     maximize, use_log_fidelity, sigma_mode)
                 total_shots_count += n_rec
             end
-
+            if iter_callback !== nothing
+                iter_callback(it, gp, best_x, y_raw, x_rec_cur, μ_rec, s_rec_cur, y_rec_cur)
+            end
             if _is_far_enough(x_rec_cur, X, write_idx)
                 write_idx += 1
                 X[:, write_idx] = x_rec_cur
@@ -772,18 +936,39 @@ function bayesopt_ucb_threshold(f;
         # For :s2/:mean: reuses y_rec_cur from the evaluation above as stage 1.
         if fidelity_threshold !== nothing && variable_n_mode ∈ (:none, :s2, :mean)
             if variable_n_mode === :none
-                x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_rec)
-                y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
-                total_shots_count += n_shots
-                if add_check_points && _is_far_enough(x_rec_cur, X, write_idx)
-                    write_idx += 1
-                    X[:, write_idx] = x_rec_cur
-                    y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
-                    σy[write_idx] = σy1_i
+                x_rec_cur, μ_rec_es, s_rec_es = recommend_mean(gp, bounds; M=M_rec, rng=rng_rec)
+                if lcb_stop
+                    # GP posterior LCB check — no f evaluations consumed
+                    if it >= min_iter
+                        capped_μ = maximize ? min(μ_rec_es, 1.0) : max(μ_rec_es, 0.0)
+
+                        lcb = maximize ? (capped_μ - lcb_z * s_rec_es) :
+                                         (capped_μ + lcb_z * s_rec_es)
+                        reached = maximize ? (lcb >= fidelity_threshold) :
+                                             (lcb <= fidelity_threshold)
+                        if reached
+                            n_iter_actual = it
+                            y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
+                            return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
+                                                  bounds, n_shots, n_init, n_iter, maximize,
+                                                  x_rec_cur, μ_rec_es, n_iter_actual,
+                                                  maximize ? y_last_val : -y_last_val,
+                                                  gp.ℓ, gp.σf, gp.c, total_shots_count)
+                        end
+                    end
+                else
+                    y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
+                    total_shots_count += n_shots
+                    if add_check_points && _is_far_enough(x_rec_cur, X, write_idx)
+                        write_idx += 1
+                        X[:, write_idx] = x_rec_cur
+                        y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
+                        σy[write_idx] = σy1_i
+                    end
                 end
             end
 
-            if it >= min_iter
+            if !lcb_stop && it >= min_iter
                 y1 = maximize ? y_rec_cur : -y_rec_cur
                 reached1 = maximize ? (y1 >= fidelity_threshold) : (y1 <= fidelity_threshold)
 
@@ -803,6 +988,9 @@ function bayesopt_ucb_threshold(f;
                         y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
                         y_last_es = variable_n_mode === :none ? y_rec_cur :
                                     (maximize ? y_last_val : -y_last_val)
+                        if iter_callback !== nothing
+                            iter_callback(it, gp, best_x, y_raw, x_rec_cur, μ_rec_es, s_rec_es, y1)
+                        end
                         return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
                                               bounds, n_shots, n_init, n_iter, maximize,
                                               x_rec_cur, y_rec_cur, n_iter_actual, y_last_es,
@@ -818,11 +1006,22 @@ function bayesopt_ucb_threshold(f;
                             y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
                             y_last_es = variable_n_mode === :none ? y_rec_avg :
                                         (maximize ? y_last_val : -y_last_val)
+                            if iter_callback !== nothing
+                                iter_callback(it, gp, best_x, y_raw, x_rec_cur, μ_rec_es, s_rec_es, y_rec_avg)
+                            end
                             return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
                                                   bounds, n_shots, n_init, n_iter, maximize,
                                                   x_rec_cur, y_rec_avg, n_iter_actual, y_last_es,
                                                   gp.ℓ, gp.σf, gp.c, total_shots_count)
+                        else
+                            if iter_callback !== nothing
+                                iter_callback(it, gp, best_x, y_raw, x_rec_cur, μ_rec_es, s_rec_es, y2)
+                            end
                         end
+                    end
+                else
+                    if iter_callback !== nothing
+                                iter_callback(it, gp, best_x, y_raw, x_rec_cur, μ_rec_es, s_rec_es, y_rec_cur)
                     end
                 end
             end
