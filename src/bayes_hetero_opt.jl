@@ -104,6 +104,7 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
                       ℓ_bounds::Tuple{Float64,Float64}=(0.05, 1.5),
                       σf_bounds::Tuple{Float64,Float64}=(0.3, 2.0),
                       c_bounds::Tuple{Float64,Float64}=(0.05, 3.0),
+                      use_grad::Bool=false,
                       rng::Random.AbstractRNG=Random.default_rng())
 
     _validate_gp_inputs(X, y, σy)
@@ -151,6 +152,67 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
         return 0.5 * dot(ystd, αtmp) + sum(log, diag(F.L)) + 0.5 * n * log(2π)
     end
 
+    # Analytical gradient of nlml w.r.t. θ = (logℓ, logσf, logc).
+    # Uses: ∂nlml/∂θᵢ = ½ tr(W · ∂Ktot/∂θᵢ)  where W = Ktot⁻¹ - α αᵀ
+    function nlml_and_grad(θ::Vector{Float64})
+        ℓ_  = exp.(θ[1:d])
+        σf_ = exp(θ[d+1])
+        c_  = learn_noise_scale ? exp(θ[d+2]) : 1.0
+
+        K_pure = buildK(X, ℓ_, σf_)
+        σstd_  = c_ .* σstd0
+        Ktot   = copy(K_pure)
+        @inbounds for i in 1:n
+            si = max(σstd_[i], 1e-10)
+            Ktot[i, i] += si^2 + jitter
+        end
+
+        Fc = try cholesky(Symmetric(Ktot)) catch; return Inf, zeros(p_opt) end
+
+        α_ = Fc.L' \ (Fc.L \ ystd)
+        val = 0.5 * dot(ystd, α_) + sum(log, diag(Fc.L)) + 0.5 * n * log(2π)
+
+        # W = Ktot⁻¹ - α αᵀ  (via L⁻¹ to avoid explicit matrix inverse)
+        V = Fc.L \ Matrix{Float64}(I, n, n)
+        W = V' * V .- α_ .* α_'
+
+        g = zeros(p_opt)
+
+        # ∂nlml/∂logℓⱼ = ½ tr(W · ∂K_pure/∂logℓⱼ)
+        # ∂K[i,k]/∂logℓⱼ = 3σf² exp(-√3 r) (X[j,i]-X[j,k])²/ℓⱼ²
+        for j in 1:d
+            s = 0.0
+            @inbounds for i2 in 1:n
+                xi2 = view(X, :, i2)
+                for i1 in 1:n
+                    xi1 = view(X, :, i1)
+                    r2 = 0.0
+                    for l in 1:d
+                        u = (xi1[l] - xi2[l]) / ℓ_[l]
+                        r2 += u * u
+                    end
+                    r = sqrt(r2)
+                    dKij = r > 1e-12 ? 3.0*σf_^2*exp(-sqrt(3.0)*r)*(xi1[j]-xi2[j])^2/ℓ_[j]^2 : 0.0
+                    s += W[i1, i2] * dKij
+                end
+            end
+            g[j] = 0.5 * s
+        end
+
+        # ∂nlml/∂logσf = tr(W K_pure)  [∂K_pure/∂logσf = 2K_pure]
+        g[d+1] = sum(W .* K_pure)
+
+        # ∂nlml/∂logc: only diagonal noise terms contribute
+        if learn_noise_scale
+            @inbounds for i in 1:n
+                σi = c_ * σstd0[i]
+                σi ≥ 1e-10 && (g[d+2] += W[i, i] * c_^2 * σstd0[i]^2)
+            end
+        end
+
+        return val, g
+    end
+
     _θ_ε = 1e-4
     θ0 = Vector{Float64}(undef, p_opt)
     if θ_init !== nothing && length(θ_init) == p_opt
@@ -196,10 +258,17 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
             end
         end
 
-        res = optimize(nlml, lower, upper, θstart,
-                       Fminbox(LBFGS()),
-                       opts;
-                       autodiff = :finite)
+        res = if use_grad
+            nlml_fg! = (F, G, θ) -> begin
+                val, grad = nlml_and_grad(θ)
+                G !== nothing && (G .= grad)
+                F !== nothing && return val
+                return nothing
+            end
+            optimize(Optim.only_fg!(nlml_fg!), lower, upper, θstart, Fminbox(LBFGS()), opts)
+        else
+            optimize(nlml, lower, upper, θstart, Fminbox(LBFGS()), opts; autodiff=:finite)
+        end
 
         θhat = Optim.minimizer(res)
         vhat = Optim.minimum(res)
@@ -507,44 +576,69 @@ end
 
 
 """
-    recommend_mean(gp, bounds; M, rng) -> (x_rec, m_rec, s_rec)
+    recommend_mean(gp, bounds; M, k, min_sep, use_grad, rng) -> (x_rec, m_rec, s_rec)
 
-Find the point with highest GP posterior mean within `bounds` via global random
-search (M candidates) followed by one bounded L-BFGS refinement.
+Find the point with highest GP posterior mean within `bounds`.
+
+1. Sample `M` random candidates; evaluate posterior mean on all.
+2. Greedily select `k` well-separated starts (spacing ≥ `min_sep`).
+3. Run bounded L-BFGS from each start.
+   `use_grad=true` uses analytical ∇μ from `predict_latent_grad`; otherwise finite-diff.
+4. Return the best `(x_rec, m_rec, s_rec)` across all starts.
+
+With `k=1` this reduces to the original single-start behavior.
 """
-function recommend_mean(gp::HeteroGP, bounds; M::Int=20000, rng::Random.AbstractRNG=Random.default_rng())
+function recommend_mean(gp::HeteroGP, bounds;
+                        M::Int=20000,
+                        k::Int=1,
+                        min_sep::Float64=0.05,
+                        use_grad::Bool=false,
+                        rng::Random.AbstractRNG=Random.default_rng())
     M ≥ 1 || throw(ArgumentError("M must be ≥ 1"))
     lb = Float64[b[1] for b in bounds]
     ub = Float64[b[2] for b in bounds]
 
-    best_x = _rand_in_box(rng, lb, ub)
-    μ0, s2_0 = predict_latent(gp, best_x)
-    best_m = μ0
-    best_s = sqrt(max(s2_0, 0.0))
-    for _ in 1:M
-        x = _rand_in_box(rng, lb, ub)
-        μ, s2 = predict_latent(gp, x)
-        if μ > best_m
-            best_m = μ
-            best_s = sqrt(max(s2, 0.0))
-            best_x = x
-        end
+    # Global random search — collect all candidates and their mean scores
+    cands  = [_rand_in_box(rng, lb, ub) for _ in 1:M]
+    means  = Vector{Float64}(undef, M)
+    for i in 1:M
+        μ, _ = predict_latent(gp, cands[i])
+        means[i] = μ
     end
 
-    try
-        res = optimize(x -> begin μ, _ = predict_latent(gp, x); -μ end,
-                       lb, ub, copy(best_x),
-                       Fminbox(LBFGS()),
-                       Optim.Options(iterations=100, g_tol=1e-5, f_abstol=1e-10);
-                       autodiff=:finite)
-        x_ref = Optim.minimizer(res)
-        μ_ref, s2_ref = predict_latent(gp, x_ref)
-        if μ_ref > best_m
-            best_m = μ_ref
-            best_s = sqrt(max(s2_ref, 0.0))
-            best_x = x_ref
+    # Select top-k separated starting points
+    sel = _topk_separated(cands, means, min(k, M), min_sep)
+
+    best_x = cands[sel[1]]
+    best_m = means[sel[1]]
+    best_s = sqrt(max(last(predict_latent(gp, best_x)), 0.0))
+
+    # L-BFGS refinement from each selected start
+    lbfgs_opts = Optim.Options(iterations=100, g_tol=1e-5, f_abstol=1e-10)
+    for idx in sel
+        x0 = cands[idx]
+        try
+            res = if use_grad
+                mean_fg! = (F, G, x) -> begin
+                    μ, _, ∇μ, _ = predict_latent_grad(gp, x)
+                    G !== nothing && (@. G = -∇μ)
+                    F !== nothing && return -μ
+                    return nothing
+                end
+                optimize(Optim.only_fg!(mean_fg!), lb, ub, copy(x0), Fminbox(LBFGS()), lbfgs_opts)
+            else
+                optimize(x -> begin μ, _ = predict_latent(gp, x); -μ end,
+                         lb, ub, copy(x0), Fminbox(LBFGS()), lbfgs_opts; autodiff=:finite)
+            end
+            x_ref = Optim.minimizer(res)
+            μ_ref, s2_ref = predict_latent(gp, x_ref)
+            if μ_ref > best_m
+                best_m = μ_ref
+                best_s = sqrt(max(s2_ref, 0.0))
+                best_x = x_ref
+            end
+        catch
         end
-    catch
     end
 
     return best_x, best_m, best_s
@@ -599,14 +693,16 @@ end
 
 Heteroscedastic BO with GP-UCB acquisition. Noise model: binomial (√(Q(1-Q)/N)).
 
-Acquisition is maximized via `_acquire_topk` which supports:
-  - `k_acq`         — number of separated multi-start candidates (default 1)
-  - `min_sep`       — minimum Euclidean separation between starts (default 0.05)
-  - `use_zoom`      — random search in ℓ∞ ball around each candidate (default false)
+Acquisition and recommendation share the same multi-start parameters:
+  - `k_acq`         — number of separated multi-start candidates for both acquisition and
+                       recommendation (default 1)
+  - `min_sep`       — minimum Euclidean separation between starts, used in both (default 0.05)
+  - `use_zoom`      — random search in ℓ∞ ball around each acquisition candidate (default false)
   - `M_zoom`        — zoom sample count per candidate (default 200)
   - `zoom_radius`   — zoom ball half-width as fraction of box width (default 0.1)
-  - `use_lbfgs_acq` — L-BFGS refinement from each start (default false = pure random scan)
-  - `use_grad_acq`  — use analytical Matérn 3/2 gradients in L-BFGS (default false)
+  - `use_lbfgs_acq` — L-BFGS refinement from each acquisition start (default false = pure random scan)
+  - `use_grad_acq`  — use analytical Matérn 3/2 gradients everywhere: acquisition L-BFGS,
+                       recommendation L-BFGS (∇μ), and hyperparameter optimization (∂nlml/∂θ)
 
 `use_variable_mode`:
   - `false` — fixed N_shots per acquisition.
@@ -693,6 +789,7 @@ function bayesopt_ucb_threshold(f;
                           learn_hypers=do_opt,
                           learn_noise_scale=learn_noise_scale,
                           n_restarts=do_opt ? n_restarts : 0,
+                          use_grad=use_grad_acq,
                           jitter=1e-8,
                           rng=rng_local)
         θ_prev = gp.θ
@@ -725,7 +822,7 @@ function bayesopt_ucb_threshold(f;
         end
 
         if use_variable_mode
-            x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+            x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, k=k_acq, min_sep=min_sep, use_grad=use_grad_acq, rng=rng_local)
             y_rec_cur, σy_rec_cur, n_rec, stop_loop = _adaptive_measure(
                 f, x_rec_cur, n_floor, n_max_shots, fidelity_threshold, maximize)
             total_shots_count += n_rec
@@ -749,7 +846,7 @@ function bayesopt_ucb_threshold(f;
         end
 
         if fidelity_threshold !== nothing && !use_variable_mode
-            x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+            x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, k=k_acq, min_sep=min_sep, use_grad=use_grad_acq, rng=rng_local)
             y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
             total_shots_count += n_shots
             if _is_far_enough(x_rec_cur, X, write_idx)
@@ -785,10 +882,11 @@ function bayesopt_ucb_threshold(f;
                       learn_hypers=true,
                       learn_noise_scale=learn_noise_scale,
                       n_restarts=n_restarts + 2,
+                      use_grad=use_grad_acq,
                       jitter=1e-8,
                       rng=rng_local)
 
-    x_rec, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+    x_rec, _, _ = recommend_mean(gp, bounds; M=M_rec, k=k_acq, min_sep=min_sep, use_grad=use_grad_acq, rng=rng_local)
     y_rec_raw, _ = _call_f_raw(f, x_rec, n_shots)
     total_shots_count += n_shots
 

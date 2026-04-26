@@ -220,8 +220,9 @@ try
     results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
         try
             seed = _random_seeds[sim_idx]
+            Random.seed!(seed)   # seeds global RNG so Q-function draws (StatsBase) are reproducible
             if _use_4d
-                _phase_drift[] = (rand(MersenneTwister()) * 2.0 - 1.0) * span_phi
+                _phase_drift[] = (rand() * 2.0 - 1.0) * span_phi
                 println("Starting simulation $sim_idx (phase_drift = $(round(_phase_drift[], digits=4)))...")
             else
                 _phase_drift[] = 0.0
