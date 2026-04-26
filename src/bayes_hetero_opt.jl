@@ -22,6 +22,28 @@ using Optim
     return (σf^2) * (1 + a) * exp(-a)
 end
 
+# Analytical ∇ₓ of Matérn 3/2 kernel: ∂k/∂x_j = -3σf² exp(-√3 r)(x_j-z_j)/ℓ_j²
+function matern32_grad_x(x::AbstractVector, z::AbstractVector,
+                          ℓ::AbstractVector, σf::Float64)
+    r2 = 0.0
+    @inbounds for j in eachindex(ℓ)
+        u = (x[j] - z[j]) / ℓ[j]
+        r2 += u*u
+    end
+    r = sqrt(r2)
+    a = sqrt(3.0) * r
+    g = Vector{Float64}(undef, length(x))
+    if r < 1e-12
+        fill!(g, 0.0)
+        return g
+    end
+    coeff = -3.0 * (σf^2) * exp(-a)
+    @inbounds for j in eachindex(ℓ)
+        g[j] = coeff * (x[j] - z[j]) / (ℓ[j]^2)
+    end
+    return g
+end
+
 function buildK(X::Matrix{Float64}, ℓ::Vector{Float64}, σf::Float64)
     # X: d×n -> K: n×n
     _, n = size(X)
@@ -69,6 +91,8 @@ Fits a heteroscedastic GP with known per-point observation noise σyᵢ and
 Matérn 3/2 ARD kernel. Assumes inputs are scaled to [-1,1]^d.
 
 Optimizes θ = (logℓ, logσf, logc) by bounded LML minimization with multi-start.
+Restart strategy: r=1 warm-starts from θ₀, r=2..ceil(n/2) perturb best θ so far
+(σ=0.3 in log-space), r>ceil(n/2) fully random in [lower, upper].
 Set `learn_hypers=false` to reuse provided `θ_init` without optimization.
 """
 function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float64};
@@ -156,9 +180,17 @@ function fit_heterogp(X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float6
 
     opts = Optim.Options(iterations=250, g_tol=1e-6, f_abstol=1e-9)
 
+    n_perturb = max(0, ceil(Int, n_restarts / 2) - 1)  # restarts 2..ceil(n/2) perturb best
+
     for r in 1:n_restarts
-        θstart = copy(θ0)
-        if r > 1
+        if r == 1
+            θstart = copy(θ0)
+        elseif r <= 1 + n_perturb
+            # Perturb the current best with small Gaussian noise in log-space
+            θstart = clamp.(bestθ .+ 0.3 .* randn(rng, p_opt), lower .+ _θ_ε, upper .- _θ_ε)
+        else
+            # Fully random in [lower, upper]
+            θstart = Vector{Float64}(undef, p_opt)
             @inbounds for i in 1:p_opt
                 θstart[i] = lower[i] + rand(rng) * (upper[i] - lower[i])
             end
@@ -213,6 +245,41 @@ function predict_latent(gp::HeteroGP, x::Vector{Float64})
     return μ, s2
 end
 
+"""
+    predict_latent_grad(gp, x) -> (μ, s2, ∇μ, ∇s2)
+
+Posterior mean, variance, and their analytical gradients w.r.t. x.
+
+∇μ(x)  = yσ · ∇K(x,X) α
+∇s²(x) = yσ² · (-2 · vᵀ · L⁻¹∇K)   where ∂kxx/∂x = 0 (σf is constant w.r.t. x)
+"""
+function predict_latent_grad(gp::HeteroGP, x::Vector{Float64})
+    X = gp.X
+    d, n = size(X)
+
+    k  = Vector{Float64}(undef, n)
+    ∇K = Matrix{Float64}(undef, d, n)
+    @inbounds for i in 1:n
+        xi = view(X, :, i)
+        k[i]    = matern32(x, xi, gp.ℓ, gp.σf)
+        ∇K[:,i] = matern32_grad_x(x, xi, gp.ℓ, gp.σf)
+    end
+
+    μstd  = dot(k, gp.α)
+    v     = gp.L \ k
+    kxx   = matern32(x, x, gp.ℓ, gp.σf)
+    s2std = max(kxx - dot(v, v), 0.0)
+
+    μ  = gp.yμ + gp.yσ * μstd
+    s2 = (gp.yσ^2) * s2std
+
+    ∇μ  = gp.yσ .* (∇K * gp.α)
+    Lv  = gp.L \ ∇K   # d×n
+    ∇s2 = (gp.yσ^2) .* (-2.0 .* (Lv * v))
+
+    return μ, s2, ∇μ, ∇s2
+end
+
 # -------------------------
 # BO structures + utilities
 # -------------------------
@@ -245,8 +312,6 @@ end
     return nothing
 end
 
-# Returns true if x is at least min_dist away (Euclidean) from all n filled columns of X.
-# Used to prevent near-duplicate training points that ill-condition the kernel matrix K.
 @inline function _is_far_enough(x::AbstractVector{Float64}, X::Matrix{Float64}, n::Int;
                                  min_dist::Float64=1e-4)
     @inbounds for i in 1:n
@@ -260,9 +325,6 @@ end
     return true
 end
 
-# f(x, N) must return a tuple (y::Float64, σy::Float64).
-# y  is the fidelity observation (linear Q scale).
-# σy is the GP observation noise: √(Q(1-Q)/N) for binomial noise model.
 @inline function _call_f_raw(f, x::Vector{Float64}, n::Int)
     result = f(x, n)
     result isa Tuple || throw(ArgumentError("f must return a (y, σy) tuple when called with N::Int"))
@@ -278,28 +340,183 @@ end
     return x
 end
 
-# μ is the fidelity of the GP at the given point. s2 is the variance.
-# The larger kappa is, the more exploration the acquisition function does.
 @inline ucb_score(μ::Float64, s2::Float64, κ::Float64) = μ + κ * sqrt(max(s2, 0.0))
+
+
+"""
+    _topk_separated(candidates, scores, k, min_sep)
+
+Greedy maximin: pick the top-scoring candidate, then repeatedly add the
+candidate with highest score that is at least `min_sep` (Euclidean) from all
+already-selected candidates. Returns indices into `candidates`.
+"""
+function _topk_separated(candidates::Vector{Vector{Float64}},
+                          scores::Vector{Float64},
+                          k::Int,
+                          min_sep::Float64)
+    n = length(candidates)
+    k = min(k, n)
+    selected = Int[]
+    sizehint!(selected, k)
+
+    order = sortperm(scores; rev=true)
+
+    for idx in order
+        if isempty(selected)
+            push!(selected, idx)
+        else
+            far = true
+            xi = candidates[idx]
+            for s in selected
+                xs = candidates[s]
+                d2 = 0.0
+                for j in eachindex(xi)
+                    u = xi[j] - xs[j]
+                    d2 += u*u
+                end
+                if d2 < min_sep^2
+                    far = false
+                    break
+                end
+            end
+            far && push!(selected, idx)
+        end
+        length(selected) == k && break
+    end
+    return selected
+end
+
+"""
+    _acq_lbfgs(gp, x0, lb, ub, κ; use_grad, n_iters) -> x_opt
+
+Maximize UCB from x0 using bounded L-BFGS.
+`use_grad=true` uses analytical GP posterior gradients; `false` uses finite differences.
+"""
+function _acq_lbfgs(gp::HeteroGP, x0::Vector{Float64},
+                    lb::Vector{Float64}, ub::Vector{Float64},
+                    κ::Float64; use_grad::Bool=false, n_iters::Int=100)
+    if use_grad
+        function fg!(F, G, x)
+            μ, s2, ∇μ, ∇s2 = predict_latent_grad(gp, x)
+            s = sqrt(max(s2, 0.0))
+            if G !== nothing
+                @. G = -(∇μ + (s > 1e-12 ? κ * ∇s2 / (2 * s) : zero(∇μ)))
+            end
+            F !== nothing && return -(μ + κ * s)
+            return nothing
+        end
+        res = optimize(Optim.only_fg!(fg!), lb, ub, copy(x0),
+                       Fminbox(LBFGS()),
+                       Optim.Options(iterations=n_iters, g_tol=1e-5, f_abstol=1e-10))
+    else
+        res = optimize(x -> begin μ, s2 = predict_latent(gp, x); -(μ + κ * sqrt(max(s2, 0.0))) end,
+                       lb, ub, copy(x0),
+                       Fminbox(LBFGS()),
+                       Optim.Options(iterations=n_iters, g_tol=1e-5, f_abstol=1e-10);
+                       autodiff=:finite)
+    end
+    return Optim.minimizer(res)
+end
+
+
+"""
+    _acquire_topk(gp, lb, ub, κ; ...) -> (best_x, best_ucb)
+
+Acquisition maximization with top-k separated multi-start strategy:
+
+1. Sample `M_acq` random candidates; evaluate UCB on all.
+2. Greedily pick `k_acq` well-separated starts (greedy maximin, spacing ≥ `min_sep`).
+3. For each start:
+   - If `use_zoom`: sample `M_zoom` points in an ℓ∞ ball of radius `zoom_radius` (scaled)
+     around the candidate; keep the best.
+   - If `use_lbfgs_acq`: refine from the current best point via bounded L-BFGS.
+     `use_grad_acq` controls analytical vs finite-difference gradients.
+4. Return the overall best across all starts.
+
+With `k_acq=1`, `use_zoom=false`, `use_lbfgs_acq=false` this reduces to plain random scan
+(original baseline behavior).
+"""
+function _acquire_topk(gp::HeteroGP,
+                        lb::Vector{Float64}, ub::Vector{Float64},
+                        κ::Float64;
+                        M_acq::Int=5000,
+                        k_acq::Int=1,
+                        min_sep::Float64=0.05,
+                        use_zoom::Bool=false,
+                        M_zoom::Int=200,
+                        zoom_radius::Float64=0.1,
+                        use_lbfgs_acq::Bool=false,
+                        use_grad_acq::Bool=false,
+                        rng::Random.AbstractRNG=Random.default_rng())
+
+    # Step 1: random global candidates
+    cands  = [_rand_in_box(rng, lb, ub) for _ in 1:M_acq]
+    scores = Vector{Float64}(undef, M_acq)
+    for i in 1:M_acq
+        μ, s2 = predict_latent(gp, cands[i])
+        scores[i] = ucb_score(μ, s2, κ)
+    end
+
+    # Step 2: select top-k separated starting points
+    sel = _topk_separated(cands, scores, min(k_acq, M_acq), min_sep)
+
+    best_x   = cands[sel[1]]
+    best_ucb = scores[sel[1]]
+
+    # Step 3+4: zoom and/or L-BFGS from each selected start
+    for idx in sel
+        x0 = cands[idx]
+        a0 = scores[idx]
+
+        if use_zoom
+            zoom_best_x   = x0
+            zoom_best_ucb = a0
+            width = ub .- lb
+            for _ in 1:M_zoom
+                xz = clamp.(x0 .+ zoom_radius .* (2 .* rand(rng, length(lb)) .- 1) .* width, lb, ub)
+                μz, s2z = predict_latent(gp, xz)
+                az = ucb_score(μz, s2z, κ)
+                if az > zoom_best_ucb
+                    zoom_best_ucb = az
+                    zoom_best_x   = xz
+                end
+            end
+            x0 = zoom_best_x
+            a0 = zoom_best_ucb
+        end
+
+        if use_lbfgs_acq
+            x_opt = try
+                _acq_lbfgs(gp, x0, lb, ub, κ; use_grad=use_grad_acq)
+            catch
+                x0
+            end
+            μ_opt, s2_opt = predict_latent(gp, x_opt)
+            a0 = ucb_score(μ_opt, s2_opt, κ)
+            x0 = x_opt
+        end
+
+        if a0 > best_ucb
+            best_ucb = a0
+            best_x   = x0
+        end
+    end
+
+    return best_x, best_ucb
+end
 
 
 """
     recommend_mean(gp, bounds; M, rng) -> (x_rec, m_rec, s_rec)
 
-Find the point with highest GP posterior mean within `bounds`.
-
-Global search over `M` random candidates, then local refinement with
-bounded L-BFGS from the best candidate.
-
-Returns `(x_rec, m_rec, s_rec)` where `m_rec` is the posterior mean
-and `s_rec` is the posterior std at `x_rec` (useful for LCB stopping checks).
+Find the point with highest GP posterior mean within `bounds` via global random
+search (M candidates) followed by one bounded L-BFGS refinement.
 """
 function recommend_mean(gp::HeteroGP, bounds; M::Int=20000, rng::Random.AbstractRNG=Random.default_rng())
     M ≥ 1 || throw(ArgumentError("M must be ≥ 1"))
     lb = Float64[b[1] for b in bounds]
     ub = Float64[b[2] for b in bounds]
 
-    # Global random search
     best_x = _rand_in_box(rng, lb, ub)
     μ0, s2_0 = predict_latent(gp, best_x)
     best_m = μ0
@@ -314,7 +531,6 @@ function recommend_mean(gp::HeteroGP, bounds; M::Int=20000, rng::Random.Abstract
         end
     end
 
-    # Local refinement: bounded L-BFGS with finite-diff gradients.
     try
         res = optimize(x -> begin μ, _ = predict_latent(gp, x); -μ end,
                        lb, ub, copy(best_x),
@@ -329,21 +545,15 @@ function recommend_mean(gp::HeteroGP, bounds; M::Int=20000, rng::Random.Abstract
             best_x = x_ref
         end
     catch
-        # If refinement fails (rare), fall back to random-search result
     end
 
     return best_x, best_m, best_s
 end
 
 # -------------------------
-# Variable-N helper: variable mode
+# Variable-N helper
 # -------------------------
 
-# Adaptive measurement for :variable mode (binomial noise, linear Q scale).
-# Starts with n_floor shots, accumulates in batches until:
-#   - Q falls below threshold (was noise) → stop_loop=false
-#   - n_max reached with Q still above threshold → stop_loop=true (confirmed above)
-# Returns (y_out, σy_out, N_total_used, stop_loop).
 function _adaptive_measure(f, x::Vector{Float64},
                            n_floor::Int, n_max::Int,
                            threshold::Float64,
@@ -354,7 +564,6 @@ function _adaptive_measure(f, x::Vector{Float64},
     k_total = Q_cur * Float64(n_floor)
     N_total = n_floor
 
-    # Only activate if initial measurement is above threshold
     at_or_above = maximize ? (Q_cur >= threshold) : (Q_cur <= threshold)
     if !at_or_above
         σy_f = sqrt(max(Q_cur * (1.0 - Q_cur), 0.0) / N_total)
@@ -390,20 +599,28 @@ end
 
 Heteroscedastic BO with GP-UCB acquisition. Noise model: binomial (√(Q(1-Q)/N)).
 
-`use_variable_mode`:
-  - `false` — fixed N_shots per acquisition; optional threshold check via two noisy evaluations.
-  - `true`  — adaptive shots at x_rec each iteration; early stop when confirmed above threshold.
-              Acquisition point always uses n_floor shots. Requires `fidelity_threshold`.
+Acquisition is maximized via `_acquire_topk` which supports:
+  - `k_acq`         — number of separated multi-start candidates (default 1)
+  - `min_sep`       — minimum Euclidean separation between starts (default 0.05)
+  - `use_zoom`      — random search in ℓ∞ ball around each candidate (default false)
+  - `M_zoom`        — zoom sample count per candidate (default 200)
+  - `zoom_radius`   — zoom ball half-width as fraction of box width (default 0.1)
+  - `use_lbfgs_acq` — L-BFGS refinement from each start (default false = pure random scan)
+  - `use_grad_acq`  — use analytical Matérn 3/2 gradients in L-BFGS (default false)
 
-Set `maximize=false` to minimize.
-Use `seed` for determinism without affecting the global RNG.
+`use_variable_mode`:
+  - `false` — fixed N_shots per acquisition.
+  - `true`  — adaptive shots at x_rec; early stop when confirmed above threshold.
+              Requires `fidelity_threshold`.
+
+Set `maximize=false` to minimize. Use `seed` for reproducibility.
 """
 function bayesopt_ucb_threshold(f;
                                bounds::Vector{Tuple{Float64,Float64}},
                                n_shots::Int=400,
                                n_init::Int=8,
                                n_iter::Int=30,
-                               M_acq::Int=5000,
+                               M_acq::Int=20000,
                                M_rec::Int=20000,
                                κ::Float64=2.0,
                                α::Float64=0.5,
@@ -418,7 +635,15 @@ function bayesopt_ucb_threshold(f;
                                n_restarts::Int=6,
                                use_variable_mode::Bool=false,
                                n_floor::Int=50,
-                               n_max_shots::Int=2000)
+                               n_max_shots::Int=2000,
+                               # Acquisition options
+                               k_acq::Int=1,
+                               min_sep::Float64=0.05,
+                               use_zoom::Bool=false,
+                               M_zoom::Int=200,
+                               zoom_radius::Float64=0.1,
+                               use_lbfgs_acq::Bool=false,
+                               use_grad_acq::Bool=false)
 
     _validate_bounds(bounds)
     n_init ≥ 1 || throw(ArgumentError("n_init must be ≥ 1"))
@@ -430,6 +655,7 @@ function bayesopt_ucb_threshold(f;
     n_shots ≥ 1   || throw(ArgumentError("n_shots must be ≥ 1"))
     n_floor ≥ 1 || throw(ArgumentError("n_floor must be ≥ 1"))
     n_max_shots ≥ n_floor || throw(ArgumentError("n_max_shots must be ≥ n_floor"))
+    k_acq ≥ 1 || throw(ArgumentError("k_acq must be ≥ 1"))
     (use_variable_mode && fidelity_threshold === nothing) &&
         throw(ArgumentError("fidelity_threshold required for use_variable_mode=true"))
 
@@ -439,7 +665,6 @@ function bayesopt_ucb_threshold(f;
     ub = Float64[b[2] for b in bounds]
 
     d = length(bounds)
-    # Pre-allocate with extra capacity for x_rec check calls.
     n_cap = n_init + 3 * n_iter
     X  = Matrix{Float64}(undef, d, n_cap)
     y  = Vector{Float64}(undef, n_cap)
@@ -447,7 +672,6 @@ function bayesopt_ucb_threshold(f;
     write_idx         = 0
     total_shots_count = 0
 
-    # Initial design: uniform random
     for i in 1:n_init
         x = _rand_in_box(rng_local, lb, ub)
         y_raw, σy_i = _call_f_raw(f, x, n_shots)
@@ -473,21 +697,17 @@ function bayesopt_ucb_threshold(f;
                           rng=rng_local)
         θ_prev = gp.θ
 
-        # Acquisition: random candidates + optional explore fraction
-        best_x  = _rand_in_box(rng_local, lb, ub)
-        best_a  = -Inf
+        best_x, best_a = _acquire_topk(gp, lb, ub, κ;
+                                        M_acq=M_acq,
+                                        k_acq=k_acq,
+                                        min_sep=min_sep,
+                                        use_zoom=use_zoom,
+                                        M_zoom=M_zoom,
+                                        zoom_radius=zoom_radius,
+                                        use_lbfgs_acq=use_lbfgs_acq,
+                                        use_grad_acq=use_grad_acq,
+                                        rng=rng_local)
 
-        for i in 1:M_acq
-            x = _rand_in_box(rng_local, lb, ub)
-            μ, s2 = predict_latent(gp, x)
-            a = ucb_score(μ, s2, κ)
-            if a > best_a
-                best_a = a
-                best_x = x
-            end
-        end
-
-        # Acquisition N: n_shots for fixed mode, n_floor for variable mode
         n_acq = use_variable_mode ? n_floor : n_shots
 
         y_raw, σy_i = _call_f_raw(f, best_x, n_acq)
@@ -504,7 +724,6 @@ function bayesopt_ucb_threshold(f;
             @info "it=$it best_acq=$best_a"
         end
 
-        # --- variable mode: adaptive measurement at x_rec ---
         if use_variable_mode
             x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
             y_rec_cur, σy_rec_cur, n_rec, stop_loop = _adaptive_measure(
@@ -529,7 +748,6 @@ function bayesopt_ucb_threshold(f;
             end
         end
 
-        # --- Fixed-N threshold check: two noisy evaluations at x_rec ---
         if fidelity_threshold !== nothing && !use_variable_mode
             x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
             y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
@@ -562,7 +780,6 @@ function bayesopt_ucb_threshold(f;
         end
     end
 
-    # Final GP fit with extra restarts
     gp = fit_heterogp(X[:, 1:write_idx], y[1:write_idx], σy[1:write_idx];
                       θ_init=θ_prev,
                       learn_hypers=true,
