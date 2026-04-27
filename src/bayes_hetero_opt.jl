@@ -874,7 +874,7 @@ function bayesopt_ucb_threshold(f;
             n_acq = n_shots
         end
         y_raw, σy_i = _call_f_raw(f, best_x, n_acq)
-
+        total_shots_count += n_acq
 
         if _is_far_enough(best_x, X, write_idx)
             write_idx += 1
