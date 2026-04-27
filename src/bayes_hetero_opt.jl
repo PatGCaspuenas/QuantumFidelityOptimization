@@ -592,8 +592,7 @@ is at most `η` times the larger of:
 The returned value is clipped to `[n_floor, n_max_shots]`.
 """
 function _choose_N_shot(μ::Float64,
-                        s2::Float64,
-                        threshold::Float64;
+                        s2::Float64;
                         n_floor::Int=50,
                         n_max_shots::Int=2000,
                         η::Float64=0.5,
@@ -604,9 +603,7 @@ function _choose_N_shot(μ::Float64,
     η > 0 || throw(ArgumentError("η must be > 0"))
 
     q = clamp(μ, 1e-6, 1.0 - 1e-6)
-    s = sqrt(max(s2, 0.0))
-
-    scale = max(s, abs(μ - threshold), 1e-6)
+    scale = sqrt(max(s2, 0.0))
     target_σ = η * scale
 
     N_req = ceil(Int, q * (1.0 - q) / target_σ^2)
@@ -865,8 +862,7 @@ function bayesopt_ucb_threshold(f;
 
             n_acq = _choose_N_shot(
                 μ_acq,
-                s2_acq,
-                fidelity_threshold;
+                s2_acq;
                 n_floor=n_floor,
                 n_max_shots=n_max_shots,
                 η=N_policy_η,
