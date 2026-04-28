@@ -3,6 +3,7 @@
 # ── Module-level constants (immutable, safe to share) ────────────────────────
 # Parity lookup: index 1=SS(+1), 2=SD(-1), 3=DS(-1), 4=DD(+1)
 const PARITY_VALUES = (1, -1, -1, 1)
+const _TARGET_PARITY_ANALYSIS_PHASE = π / 4
 const _SPIN_BASIS = SpinBasis(1 // 2)
 const _TWO_QUBIT_BASIS = tensor(_SPIN_BASIS, _SPIN_BASIS)
 
@@ -39,6 +40,23 @@ function ion_sim_to_qo_operator(ρ)
 end
 
 proj(state, ρ) = real(expect(state ⊗ dagger(state), ρ))
+
+function _normalized_population_weights(values::NTuple{4,<:Real})
+    weights = Float64[max(Float64(v), 0.0) for v in values]
+    total = sum(weights)
+    total > 0.0 || throw(ArgumentError("Population weights must have positive total."))
+    return weights ./ total
+end
+
+function _expected_ms_even_populations(numMS::Int)
+    numMS ≥ 1 || throw(ArgumentError("numMS must be positive."))
+    if isodd(numMS)
+        return (SS=0.5, DD=0.5)
+    elseif numMS % 4 == 2
+        return (SS=0.0, DD=1.0)
+    end
+    return (SS=1.0, DD=0.0)
+end
 
 # --- IonSim setup (centralized to avoid repetition)
 
@@ -177,14 +195,16 @@ end
 """
     Q_noisy(t, f_cl, f_sb, A; phi_1=0.0, phi_2=0.0, N=100, phase_grid=0:0.1:π) -> Real
 
-Noisy estimator based on sampling + parity scan + cosine fit.
-
-Requires `StatsBase` and `LsqFit`. This method attempts to load them at call-time
-and throws an informative error if unavailable.
+Noisy Bell-state fidelity estimator based on sampled populations and a parity scan.
+The parity scan extracts the signed coherence at the target analysis phase, so
+accumulated Bell-phase errors reduce the returned fidelity instead of being fit away.
 """
 function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
                  phi_1::Float64=0.0, phi_2::Float64=0.0,
                  N::Int=100, phase_grid::AbstractRange{Float64}=0.0:0.1:π)::Float64
+    N > 0 || throw(ArgumentError("N must be positive."))
+    scan_phases = collect(Float64, phase_grid)
+    length(scan_phases) ≥ 3 || throw(ArgumentError("phase_grid must contain at least 3 points."))
 
     setup = build_chamber()
     configure_lasers!(setup, f_cl, f_sb, A, phi_1=phi_1, phi_2=phi_2)
@@ -200,7 +220,7 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
     DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
 
-    weights = Float64[SS, SD, DS, DD]
+    weights = _normalized_population_weights((SS, SD, DS, DD))
 
     samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
     P_odd = count(s -> s == 2 || s == 3, samples) / N
@@ -222,26 +242,34 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
         p[2] = proj(SDs, ρφ)
         p[3] = proj(DSs, ρφ)
         p[4] = proj(DDs, ρφ)
-        @. p = max(p, 0.0)
-        p ./= sum(p)
+        p .= _normalized_population_weights((p[1], p[2], p[3], p[4]))
 
         s = StatsBase.sample(1:4, StatsBase.Weights(p), N)
         meas[i] = sum(PARITY_VALUES[x] for x in s) / N
     end
 
-    model(φ, par) = @. par[1] * cos(par[2] * φ + par[3]) + par[4]
-    p0 = Float64[0.8, 1.0, 0.0, 0.0]
-    fit = LsqFit.curve_fit(model, collect(Float64, phase_grid), meas, p0,
-        lower=Float64[-1.0, -2.0, -Inf, -0.1],
-        upper=Float64[1.0, 2.0, Inf, 0.1])
-    C = abs(fit.param[1])
+    X = hcat(cos.(2.0 .* scan_phases), sin.(2.0 .* scan_phases), ones(length(scan_phases)))
+    coeff = X \ meas
 
-    return (1 - P_odd + C) / 2
+    target_phase = _TARGET_PARITY_ANALYSIS_PHASE
+    parity_at_target = coeff[1] * cos(2.0 * target_phase) + coeff[2] * sin(2.0 * target_phase)
+    C = -parity_at_target
+
+    return clamp((1 - P_odd + C) / 2, 0.0, 1.0)
 end
 
+"""
+    Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, relative_phase=0.0, phase_drift=0.0) -> Float64
+
+Sampled population-score estimator for repeated MS pulses. The expected even
+populations are inferred from `numMS`: odd counts target a balanced SS/DD readout,
+`numMS % 4 == 2` targets DD, and `numMS % 4 == 0` targets SS.
+"""
 function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
                  N::Int=1000, numMS::Int=2,
                  relative_phase::Float64=0.0, phase_drift::Float64=0.0)::Float64
+    N > 0 || throw(ArgumentError("N must be positive."))
+    expected = _expected_ms_even_populations(numMS)
 
     setup = build_chamber()
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
@@ -264,49 +292,15 @@ function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
     SD = real(expect(ionprojector(chamber, "S", "D"), state))
     DS = real(expect(ionprojector(chamber, "D", "S"), state))
 
-    # Define success predicate based on the number of gates (zero-alloc)
-    success_pred = if isodd(numMS)
-        s -> s == 1 || s == 2   # SS or DD
-    elseif numMS % 4 == 2
-        s -> s == 2             # DD only
-    else
-        s -> s == 1             # SS only
-    end
-
-    weights = Float64[max(SS, 0.0), max(DD, 0.0), max(SD, 0.0), max(DS, 0.0)]
+    # Q_varMS sampling order: 1=SS, 2=DD, 3=SD, 4=DS.
+    weights = _normalized_population_weights((SS, DD, SD, DS))
     samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
 
-    parity = count(success_pred, samples)
-
-    return parity / N
-end
-
-function Q_varMS_balance(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
-                         N::Int=1000, numMS::Int=3,
-                         relative_phase::Float64=0.0, phase_drift::Float64=0.0)::Float64
-    setup = build_chamber()
-    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
-    tout = Float64[0.0, t]
-    state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
-    for gate_idx in 1:numMS
-        accumulated = (gate_idx - 1)
-        net_phase = accumulated * (relative_phase - phase_drift)
-        configure_lasers!(setup, f_cl, Δ, I,
-                          phi_1=net_phase,
-                          phi_2=0.0)
-        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
-        _, sol = timeevolution.schroedinger_dynamic(tout, state, h)
-        state = sol[end]
-    end
-    SS = real(expect(ionprojector(chamber, "S", "S"), state))
-    DD = real(expect(ionprojector(chamber, "D", "D"), state))
-    SD = real(expect(ionprojector(chamber, "S", "D"), state))
-    DS = real(expect(ionprojector(chamber, "D", "S"), state))
-    weights = Float64[max(SS, 0.0), max(DD, 0.0), max(SD, 0.0), max(DS, 0.0)]
-    samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
     P_SS = count(==(1), samples) / N
     P_DD = count(==(2), samples) / N
-    return 1.0 - (abs(0.5 - P_SS) + abs(0.5 - P_DD))
+
+    score = 1.0 - (abs(expected.SS - P_SS) + abs(expected.DD - P_DD))
+    return clamp(score, 0.0, 1.0)
 end
 
 """

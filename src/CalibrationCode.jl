@@ -7,7 +7,7 @@ using Statistics
 using LinearAlgebra
 using Logging
 
-using IonSim, QuantumOptics, StatsBase, LsqFit
+using IonSim, QuantumOptics, StatsBase
 const pc = IonSim.PhysicalConstants
 
 # --- Physics / estimators (IonSim + QuantumOptics live in calibration.jl) ---
@@ -30,7 +30,7 @@ include("bayes_MF_opt.jl")          # N-fidelity augmented-input GP (z-levels)
 # -------------------------------
 
 # Estimators / calibration
-export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy, Q_varMS, Q_varMS_balance, Q_mc_varMS,
+export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy, Q_varMS, Q_mc_varMS,
        Q_ms_sequence, Q_ms_sequence_det, sequence_C_subgates
 
 # Homoscedastic BO

@@ -65,8 +65,8 @@ try
     # Objective mode:
     #   "2ms"             → Q_varMS(numMS=2), maximize F                     (default, original behavior)
     #   "2ms_log"         → Q_varMS(numMS=2), minimize log10(1-F)
-    #   "3ms_balance"     → Q_varMS_balance(numMS=3), maximize 1-|½-P_SS|-|½-P_DD|
-    #   "3ms_balance_log" → Q_varMS_balance(numMS=3), minimize log10(1-F)
+    #   "3ms_balance"     → Q_varMS(numMS=3), maximize expected-population score
+    #   "3ms_balance_log" → Q_varMS(numMS=3), minimize log10(1-F)
     #   "jacobian"        → Q_ms_sequence with searched subgates, maximize
     objective_mode   =           get(ENV, "BO_OBJECTIVE_MODE", "2ms")  # BO_OBJECTIVE_MODE=2ms/2ms_log/...
     # 4D mode: adds inter-gate phase φ as 4th optimization dimension
@@ -131,7 +131,7 @@ try
 
     @everywhere function _eval_raw(fcl, fsb, A, N::Int; phi::Float64=0.0)
         if _objective_mode == "3ms_balance" || _objective_mode == "3ms_balance_log"
-            return CalibrationCode.Q_varMS_balance(t, fcl, fsb, A; N=N, numMS=3,
+            return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=3,
                 relative_phase=phi, phase_drift=_phase_drift[])
         elseif _objective_mode == "jacobian"
             return clamp(CalibrationCode.Q_ms_sequence(t, fcl, fsb, A, _jac_subgates;
