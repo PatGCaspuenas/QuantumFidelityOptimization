@@ -1,7 +1,7 @@
 # scripts/plot_3ms_balance_fsb_slice.jl
 #
 # Standalone: fixes f_cl and A from benchmark_3ms_balance_N10000.txt, scans f_sb,
-# plots Born-rule 1 - (|0.5-SS| + |0.5-DD|) after the same 3×MS stack as Q_varMS_balance.
+# plots Born-rule 1 - (|0.5-SS| + |0.5-DD|) after the same 3×MS stack as Q_varMS(numMS=3).
 #
 # Optional ENV:
 #   SLICE_FSB_HALF_WIDTH_KHZ — half-width of f_sb scan in kHz (default 2.0, matches BO box)
@@ -19,7 +19,7 @@ using Plots
 include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
 using .CalibrationCode
 
-"""Same evolution as `Q_varMS_balance`; returns Born 1 - |½-SS| - |½-DD| (no shot noise)."""
+"""Same evolution as `Q_varMS(numMS=3)`; returns Born 1 - |½-SS| - |½-DD| (no shot noise)."""
 function balance_score_born(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
                             numMS::Int=3, phi::Float64=0.0)::Float64
     setup = CalibrationCode.build_chamber()

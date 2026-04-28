@@ -25,7 +25,7 @@ const OMEGA_REFINE_MAX = 1.03
 const OMEGA_REFINE_STEPS = 71
 const POP_COLORS = (gg=:forestgreen, ee=:royalblue3, mid=:darkorange2)
 const SEARCH_SEQUENCE_NAME = :seq_C
-const SEARCH_SEQUENCE_LABEL = "Best Jacobian probe"
+const SEARCH_SEQUENCE_LABEL = nothing  # filled dynamically from subgates
 const SEARCH_SEQUENCE_STYLE = :dashdot
 const SEARCH_RESULT_PATH = joinpath(@__DIR__, "..", "data", "ms_sequence_search_result.jl")
 
@@ -119,7 +119,7 @@ function build_sequence_registry(search_result)
     if search_result.distinct
         push!(specs, CC.MSSequenceSpec(
             name=SEARCH_SEQUENCE_NAME,
-            label=SEARCH_SEQUENCE_LABEL,
+            label=describe_subgates(search_result.best_overall.subgates),
             subgates=search_result.best_overall.subgates,
             linestyle=SEARCH_SEQUENCE_STYLE,
         ))
@@ -186,21 +186,47 @@ function main()
         @info "Best distinct non-baseline candidate" score=search_result.best_new.score sequence=describe_subgates(search_result.best_new.subgates)
     end
 
+    @info "Running scans..." n_sequences=length(specs)
+    rabi_results = [scan_rabi(Ω_ratios, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
     phase_results = [scan_relative_phase(Δφ_grid, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
+    sb_results = [scan_sideband(Δ_error_grid, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
+    cl_results = [scan_centerline(fcl_error_grid, t, f_cl_ideal, Δ_ideal, I_center, spec) for spec in specs]
 
     CairoMakie.activate!(type="png")
-    fig = Figure(size=(700, 500), figure_padding=(24, 36, 18, 20))
+    fig = Figure(size=(1400, 900), figure_padding=(24, 36, 18, 20))
     add_legends!(fig, specs)
 
-    ax_phase = Axis(fig[1, 1];
+    ax_rabi = Axis(fig[1, 1];
+        xlabel="Ω / Ω₀",
+        ylabel="Expectation value",
+        xlabelpadding=10, ylabelpadding=10,
+        title="Rabi Frequency Error",
+    )
+    draw_scan!(ax_rabi, Ω_ratios, rabi_results, specs)
+
+    ax_phase = Axis(fig[1, 2];
         xlabel="Relative phase δ (π)",
         ylabel="Expectation value",
-        xlabelpadding=10,
-        ylabelpadding=10,
+        xlabelpadding=10, ylabelpadding=10,
         title="Relative Phase Error (φ₁ − φ₂)",
     )
-
     draw_scan!(ax_phase, Δφ_grid ./ π, phase_results, specs)
+
+    ax_sb = Axis(fig[2, 1];
+        xlabel="Sideband detuning error (Hz)",
+        ylabel="Expectation value",
+        xlabelpadding=10, ylabelpadding=10,
+        title="Sideband Detuning Error",
+    )
+    draw_scan!(ax_sb, Δ_error_grid, sb_results, specs)
+
+    ax_cl = Axis(fig[2, 2];
+        xlabel="Centerline error (Hz)",
+        ylabel="Expectation value",
+        xlabelpadding=10, ylabelpadding=10,
+        title="Centerline Frequency Error",
+    )
+    draw_scan!(ax_cl, fcl_error_grid, cl_results, specs)
 
     outdir = joinpath(@__DIR__, "..", "figures")
     mkpath(outdir)

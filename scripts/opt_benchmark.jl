@@ -50,13 +50,12 @@ try
     #   "2ms"             → Q_varMS(numMS=2)              [default]
     #   "3ms"             → Q_varMS(numMS=3)
     #   "2ms_log"         → Q_varMS(numMS=2), minimize log10(1-F)
-    #   "3ms_balance"     → Q_varMS_balance(numMS=3)
-    #   "3ms_balance_log" → Q_varMS_balance(numMS=3), minimize log10(1-F)
-    objective_mode = get(ENV, "BO_OBJECTIVE_MODE", "2ms")
-    use_4d         = get(ENV, "BO_USE_4D", "false") == "true"
-
-    _valid_modes = ("2ms", "3ms", "2ms_log", "3ms_balance", "3ms_balance_log")
-    objective_mode in _valid_modes || error("Unknown BO_OBJECTIVE_MODE=$objective_mode. Valid: $(_valid_modes)")
+    #   "3ms_balance"     → Q_varMS(numMS=3), maximize expected-population score
+    #   "3ms_balance_log" → Q_varMS(numMS=3), minimize log10(1-F)
+    #   "jacobian"        → Q_ms_sequence with searched subgates, maximize
+    objective_mode   =           get(ENV, "BO_OBJECTIVE_MODE", "2ms")  # BO_OBJECTIVE_MODE=2ms/2ms_log/...
+    # 4D mode: adds inter-gate phase φ as 4th optimization dimension
+    use_4d           = get(ENV, "BO_USE_4D", "false") == "true"        # BO_USE_4D=true/false
 
     _is_log_mode = objective_mode in ("2ms_log", "3ms_balance_log")
     _do_maximize = !_is_log_mode
@@ -109,12 +108,13 @@ try
 
     @everywhere function _eval_raw(fcl, fsb, A, N::Int; phi::Float64=0.0)
         if _objective_mode == "3ms_balance" || _objective_mode == "3ms_balance_log"
-            return CalibrationCode.Q_varMS_balance(t, fcl, fsb, A; N=N, numMS=3,
-                relative_phase=phi, phase_drift=_phase_drift[])
-        elseif _objective_mode == "3ms"
             return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=3,
                 relative_phase=phi, phase_drift=_phase_drift[])
-        elseif _use_4d   # 2ms 4D
+        elseif _objective_mode == "jacobian"
+            return clamp(CalibrationCode.Q_ms_sequence(t, fcl, fsb, A, _jac_subgates;
+                N=N, expected_gg=_jac_exp_gg, expected_ee=_jac_exp_ee,
+                relative_phase=phi, phase_drift=_phase_drift[]), 0.0, 1.0)
+        elseif _use_4d
             return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=2,
                 relative_phase=phi, phase_drift=_phase_drift[])
         else             # 2ms 3D (default)
