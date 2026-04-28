@@ -201,6 +201,17 @@ function Q_ms_sequence(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
     return P_SS + P_DD
 end
 
+function Q_ms_sequence_probs(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
+                              subgates::AbstractVector{<:MSSubgate};
+                              relative_phase::Float64=0.0,
+                              phase_drift::Float64=0.0)::NTuple{4,Float64}
+    pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
+                                           relative_phase=relative_phase,
+                                           phase_drift=phase_drift)
+    pops = populations_ms_sequence(pulses)
+    return (max(pops.gg, 0.0), max(pops.ee, 0.0), max(pops.eg, 0.0), max(pops.ge, 0.0))
+end
+
 function sequence_C_subgates()
     return [
         ms_subgate(3π / 16, 0.0),

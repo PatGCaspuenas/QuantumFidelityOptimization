@@ -239,6 +239,69 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     return (1 - P_odd + C) / 2
 end
 
+function Q_noisy_precompute(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
+                            phi_1::Float64=0.0, phi_2::Float64=0.0,
+                            phase_grid::AbstractRange{Float64}=0.0:0.1:π)
+    setup = build_chamber()
+    configure_lasers!(setup, f_cl, f_sb, A, phi_1=phi_1, phi_2=phi_2)
+    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
+    h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
+    tout = Float64[0.0, t]
+    _, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
+
+    SS = max(real(expect(ionprojector(chamber, "S", "S"), sol[end])), 0.0)
+    SD = max(real(expect(ionprojector(chamber, "S", "D"), sol[end])), 0.0)
+    DS = max(real(expect(ionprojector(chamber, "D", "S"), sol[end])), 0.0)
+    DD = max(real(expect(ionprojector(chamber, "D", "D"), sol[end])), 0.0)
+    main_weights = Float64[SS, SD, DS, DD]
+
+    ρ_red = ptrace(sol[end] ⊗ dagger(sol[end]), [3])
+    ρ = ion_sim_to_qo_operator(ρ_red)
+
+    SSs = tensor(spinup(_SPIN_BASIS), spinup(_SPIN_BASIS))
+    SDs = tensor(spinup(_SPIN_BASIS), spindown(_SPIN_BASIS))
+    DSs = tensor(spindown(_SPIN_BASIS), spinup(_SPIN_BASIS))
+    DDs = tensor(spindown(_SPIN_BASIS), spindown(_SPIN_BASIS))
+
+    phase_vals = collect(Float64, phase_grid)
+    scan_probs = Vector{Vector{Float64}}(undef, length(phase_vals))
+    p = Vector{Float64}(undef, 4)
+    for (idx, φ) in enumerate(phase_vals)
+        Rφ = global_rotation(π / 2, φ)
+        ρφ = Rφ * ρ * dagger(Rφ)
+        p[1] = proj(SSs, ρφ)
+        p[2] = proj(SDs, ρφ)
+        p[3] = proj(DSs, ρφ)
+        p[4] = proj(DDs, ρφ)
+        @. p = max(p, 0.0)
+        p ./= sum(p)
+        scan_probs[idx] = copy(p)
+    end
+
+    return (main_weights=main_weights, scan_probs=scan_probs, phase_vals=phase_vals)
+end
+
+function Q_noisy_rep(precomp; N::Int=100)::Float64
+    samples = StatsBase.sample(1:4, StatsBase.Weights(precomp.main_weights), N)
+    P_odd = count(s -> s == 2 || s == 3, samples) / N
+
+    meas = map(precomp.scan_probs) do p
+        s = StatsBase.sample(1:4, StatsBase.Weights(p), N)
+        sum(PARITY_VALUES[x] for x in s) / N
+    end
+
+    model_fn(φ, par) = @. par[1] * cos(par[2] * φ + par[3]) + par[4]
+    p0 = Float64[0.8, 1.0, 0.0, 0.0]
+    fit = try
+        LsqFit.curve_fit(model_fn, precomp.phase_vals, meas, p0,
+            lower=Float64[-1.0, -2.0, -Inf, -0.1],
+            upper=Float64[ 1.0,  2.0,  Inf,  0.1])
+    catch
+        return NaN
+    end
+    return clamp((1 - P_odd + abs(fit.param[1])) / 2, 0.0, 1.0)
+end
+
 function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
                  N::Int=1000, numMS::Int=2,
                  relative_phase::Float64=0.0, phase_drift::Float64=0.0)::Float64
@@ -307,6 +370,28 @@ function Q_varMS_balance(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
     P_SS = count(==(1), samples) / N
     P_DD = count(==(2), samples) / N
     return 1.0 - (abs(0.5 - P_SS) + abs(0.5 - P_DD))
+end
+
+function Q_varMS_balance_probs(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
+                               numMS::Int=3,
+                               relative_phase::Float64=0.0, phase_drift::Float64=0.0)::NTuple{4,Float64}
+    setup = build_chamber()
+    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
+    tout = Float64[0.0, t]
+    state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
+    for gate_idx in 1:numMS
+        accumulated = (gate_idx - 1)
+        net_phase = accumulated * (relative_phase - phase_drift)
+        configure_lasers!(setup, f_cl, Δ, I, phi_1=net_phase, phi_2=0.0)
+        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
+        _, sol = timeevolution.schroedinger_dynamic(tout, state, h)
+        state = sol[end]
+    end
+    SS = max(real(expect(ionprojector(chamber, "S", "S"), state)), 0.0)
+    DD = max(real(expect(ionprojector(chamber, "D", "D"), state)), 0.0)
+    SD = max(real(expect(ionprojector(chamber, "S", "D"), state)), 0.0)
+    DS = max(real(expect(ionprojector(chamber, "D", "S"), state)), 0.0)
+    return (SS, DD, SD, DS)
 end
 
 """
