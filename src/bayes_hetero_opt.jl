@@ -411,6 +411,16 @@ end
 
 @inline ucb_score(μ::Float64, s2::Float64, κ::Float64) = μ + κ * sqrt(max(s2, 0.0))
 
+@inline _normal_cdf(z::Float64) = 0.5 * (1.0 + erf(z / sqrt(2.0)))
+@inline _normal_pdf(z::Float64) = exp(-0.5 * z^2) / sqrt(2π)
+
+@inline function ei_score(μ::Float64, s2::Float64, f_best::Float64, ξ::Float64=0.0)
+    σ = sqrt(max(s2, 0.0))
+    σ < 1e-12 && return max(μ - f_best - ξ, 0.0)
+    z = (μ - f_best - ξ) / σ
+    return (μ - f_best - ξ) * _normal_cdf(z) + σ * _normal_pdf(z)
+end
+
 
 """
     _topk_separated(candidates, scores, k, min_sep)
@@ -508,6 +518,9 @@ With `k_acq=1`, `use_zoom=false`, `use_lbfgs_acq=false` this reduces to plain ra
 function _acquire_topk(gp::HeteroGP,
                         lb::Vector{Float64}, ub::Vector{Float64},
                         κ::Float64;
+                        acq_type::String="ucb",
+                        f_best::Float64=0.0,
+                        ξ_ei::Float64=0.0,
                         M_acq::Int=5000,
                         k_acq::Int=1,
                         min_sep::Float64=0.05,
@@ -518,19 +531,25 @@ function _acquire_topk(gp::HeteroGP,
                         use_grad_acq::Bool=false,
                         rng::Random.AbstractRNG=Random.default_rng())
 
+    _acq_score = if acq_type == "ei"
+        (μ, s2) -> ei_score(μ, s2, f_best, ξ_ei)
+    else
+        (μ, s2) -> ucb_score(μ, s2, κ)
+    end
+
     # Step 1: random global candidates
     cands  = [_rand_in_box(rng, lb, ub) for _ in 1:M_acq]
     scores = Vector{Float64}(undef, M_acq)
     for i in 1:M_acq
         μ, s2 = predict_latent(gp, cands[i])
-        scores[i] = ucb_score(μ, s2, κ)
+        scores[i] = _acq_score(μ, s2)
     end
 
     # Step 2: select top-k separated starting points
     sel = _topk_separated(cands, scores, min(k_acq, M_acq), min_sep)
 
-    best_x   = cands[sel[1]]
-    best_ucb = scores[sel[1]]
+    best_x = cands[sel[1]]
+    best_a = scores[sel[1]]
 
     # Step 3+4: zoom and/or L-BFGS from each selected start
     for idx in sel
@@ -538,40 +557,40 @@ function _acquire_topk(gp::HeteroGP,
         a0 = scores[idx]
 
         if use_zoom
-            zoom_best_x   = x0
-            zoom_best_ucb = a0
+            zoom_best_x = x0
+            zoom_best_a = a0
             width = ub .- lb
             for _ in 1:M_zoom
                 xz = clamp.(x0 .+ zoom_radius .* (2 .* rand(rng, length(lb)) .- 1) .* width, lb, ub)
                 μz, s2z = predict_latent(gp, xz)
-                az = ucb_score(μz, s2z, κ)
-                if az > zoom_best_ucb
-                    zoom_best_ucb = az
-                    zoom_best_x   = xz
+                az = _acq_score(μz, s2z)
+                if az > zoom_best_a
+                    zoom_best_a = az
+                    zoom_best_x = xz
                 end
             end
             x0 = zoom_best_x
-            a0 = zoom_best_ucb
+            a0 = zoom_best_a
         end
 
-        if use_lbfgs_acq
+        if use_lbfgs_acq && acq_type == "ucb"
             x_opt = try
                 _acq_lbfgs(gp, x0, lb, ub, κ; use_grad=use_grad_acq)
             catch
                 x0
             end
             μ_opt, s2_opt = predict_latent(gp, x_opt)
-            a0 = ucb_score(μ_opt, s2_opt, κ)
+            a0 = _acq_score(μ_opt, s2_opt)
             x0 = x_opt
         end
 
-        if a0 > best_ucb
-            best_ucb = a0
-            best_x   = x0
+        if a0 > best_a
+            best_a = a0
+            best_x = x0
         end
     end
 
-    return best_x, best_ucb
+    return best_x, best_a
 end
 
 
@@ -734,6 +753,8 @@ function bayesopt_ucb_threshold(f;
                                n_floor::Int=50,
                                n_max_shots::Int=2000,
                                # Acquisition options
+                               acq_type::String="ucb",
+                               ξ_ei::Float64=0.0,
                                k_acq::Int=1,
                                min_sep::Float64=0.05,
                                use_zoom::Bool=false,
@@ -795,7 +816,11 @@ function bayesopt_ucb_threshold(f;
                           rng=rng_local)
         θ_prev = gp.θ
 
+        f_best_cur = acq_type == "ei" ? maximum(y[1:write_idx]) : 0.0
         best_x, best_a = _acquire_topk(gp, lb, ub, κ;
+                                        acq_type=acq_type,
+                                        f_best=f_best_cur,
+                                        ξ_ei=ξ_ei,
                                         M_acq=M_acq,
                                         k_acq=k_acq,
                                         min_sep=min_sep,

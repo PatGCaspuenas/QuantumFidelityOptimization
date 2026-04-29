@@ -70,6 +70,11 @@ try
     zoom_radius   = parse(Float64, get(ENV, "BO_ZOOM_RADIUS",   "0.1"))
     use_lbfgs_acq = get(ENV, "BO_USE_LBFGS_ACQ", "false") == "true"
     use_grad_acq  = get(ENV, "BO_USE_GRAD_ACQ",  "false") == "true"
+    acq_type      =            get(ENV, "BO_ACQ_TYPE",      "ucb")
+    ξ_ei          = parse(Float64, get(ENV, "BO_XI_EI",     "0.0"))
+
+    # Restrict u_A range: BO_A_BOUND in (0,1] → u_A ∈ [-BO_A_BOUND, +BO_A_BOUND]
+    a_bound = clamp(parse(Float64, get(ENV, "BO_A_BOUND", "1.0")), 1e-3, 1.0)
 
     # High-N Q_noisy evaluation at x_rec after BO (benchmark metric)
     N_noisy_high = parse(Int, get(ENV, "BO_Q_NOISY_N", "5000"))
@@ -146,8 +151,8 @@ try
     end
 
     bounds = use_2d ? [(-1.0,1.0),(-1.0,1.0)] :
-             use_4d ? [(-1.0,1.0),(-1.0,1.0),(-1.0,1.0),(-1.0,1.0)] :
-                      [(-1.0,1.0),(-1.0,1.0),(-1.0,1.0)]
+             use_4d ? [(-1.0,1.0),(-1.0,1.0),(-a_bound,a_bound),(-1.0,1.0)] :
+                      [(-1.0,1.0),(-1.0,1.0),(-a_bound,a_bound)]
 
     α_bo = 1.5
     κ_bo = 1.9
@@ -158,8 +163,10 @@ try
         fidelity_threshold_Q
     end
 
-    acq_label = if !use_lbfgs_acq && !use_zoom
-        "baseline(k=$k_acq,random)"
+    acq_label = if acq_type == "ei"
+        "ei(k=$k_acq,ξ=$ξ_ei)"
+    elseif !use_lbfgs_acq && !use_zoom
+        "ucb(k=$k_acq,random)"
     elseif use_zoom && !use_lbfgs_acq
         "zoom(k=$k_acq,r=$zoom_radius,M=$M_zoom)"
     elseif use_lbfgs_acq && !use_grad_acq
@@ -167,6 +174,7 @@ try
     else
         "lbfgs_grad(k=$k_acq,analytical)"
     end
+    a_bound_label = a_bound < 1.0 ? ",A_bound=$a_bound" : ""
 
     optimization_mode = "$(objective_mode)$(use_2d ? "_2d" : use_4d ? "_4d" : "")$(optimize_det ? "_det" : "")"
 
@@ -177,7 +185,7 @@ try
     println("Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
     println("Fidelity threshold: $(fidelity_threshold_Q === nothing ? "none (fixed $n_iter iterations)" : "Q* = $fidelity_threshold_Q (linear)")")
     println("use_variable_mode = $use_variable_mode$(use_variable_mode ? ", n_floor=$n_floor, n_max=$n_max_shots" : "")")
-    println("Acquisition: $acq_label")
+    println("Acquisition: $acq_label$a_bound_label")
     println("Q_noisy benchmark N = $N_noisy_high")
 
     start_time = time()
@@ -209,6 +217,8 @@ try
     _zoom_radius       = zoom_radius
     _use_lbfgs_acq     = use_lbfgs_acq
     _use_grad_acq      = use_grad_acq
+    _acq_type          = acq_type
+    _ξ_ei              = ξ_ei
 
     results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
         try
@@ -248,6 +258,8 @@ try
                 zoom_radius=_zoom_radius,
                 use_lbfgs_acq=_use_lbfgs_acq,
                 use_grad_acq=_use_grad_acq,
+                acq_type=_acq_type,
+                ξ_ei=_ξ_ei,
             )
 
             _params   = u_to_params(res.x_rec)
@@ -353,7 +365,7 @@ try
         println(io, "Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
         println(io, "Fidelity threshold: $(fidelity_threshold_Q === nothing ? "none" : "Q* = $fidelity_threshold_Q")")
         println(io, "use_variable_mode = $use_variable_mode$(use_variable_mode ? ", n_floor=$n_floor, n_max=$n_max_shots" : "")")
-        println(io, "Acquisition: $acq_label  (k_acq=$k_acq, min_sep=$min_sep, use_zoom=$use_zoom, M_zoom=$M_zoom, zoom_radius=$zoom_radius, use_lbfgs_acq=$use_lbfgs_acq, use_grad_acq=$use_grad_acq)")
+        println(io, "Acquisition: $acq_label$a_bound_label  (acq_type=$acq_type, k_acq=$k_acq, min_sep=$min_sep, use_zoom=$use_zoom, M_zoom=$M_zoom, zoom_radius=$zoom_radius, use_lbfgs_acq=$use_lbfgs_acq, use_grad_acq=$use_grad_acq, a_bound=$a_bound)")
         println(io, "Q_noisy benchmark N = $N_noisy_high")
         println(io, "Elapsed time: $elapsed_hms")
         println(io, "")
