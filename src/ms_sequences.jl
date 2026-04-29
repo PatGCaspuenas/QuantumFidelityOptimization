@@ -201,6 +201,30 @@ function Q_ms_sequence(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
     return P_SS + P_DD
 end
 
+function Q_ms_sequence_σ(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
+                         subgates::AbstractVector{<:MSSubgate};
+                         N::Int=400,
+                         expected_gg::Float64=NaN,
+                         expected_ee::Float64=NaN,
+                         relative_phase::Float64=0.0,
+                         phase_drift::Float64=0.0)
+    pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
+                                           relative_phase=relative_phase,
+                                           phase_drift=phase_drift)
+    pops = populations_ms_sequence(pulses)
+    weights = Float64[max(pops.gg, 0.0), max(pops.ee, 0.0),
+                      max(pops.eg, 0.0), max(pops.ge, 0.0)]
+    samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
+    P_SS = count(==(1), samples) / N
+    P_DD = count(==(2), samples) / N
+    if !isnan(expected_gg)
+        Q = clamp(1.0 - (abs(expected_gg - P_SS) + abs(expected_ee - P_DD)), 0.0, 1.0)
+        return Q, sigma_delta(P_SS, P_DD, expected_gg, expected_ee, N)
+    end
+    Q = clamp(P_SS + P_DD, 0.0, 1.0)
+    return Q, sigma_binomial(Q, N)
+end
+
 function Q_ms_sequence_probs(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
                               subgates::AbstractVector{<:MSSubgate};
                               relative_phase::Float64=0.0,

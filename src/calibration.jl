@@ -58,6 +58,15 @@ function _expected_ms_even_populations(numMS::Int)
     return (SS=1.0, DD=0.0)
 end
 
+sigma_binomial(p::Float64, N::Int)::Float64 = sqrt(max(p * (1.0 - p), 0.0) / N)
+
+function sigma_delta(p1::Float64, p2::Float64,
+                     r1::Float64, r2::Float64, N::Int)::Float64
+    s1 = p1 > r1 ? 1.0 : (p1 < r1 ? -1.0 : 0.0)
+    s2 = p2 > r2 ? 1.0 : (p2 < r2 ? -1.0 : 0.0)
+    return sqrt(max(p1*(1.0-p1) + p2*(1.0-p2) - 2.0*s1*s2*p1*p2, 0.0) / N)
+end
+
 # --- IonSim setup (centralized to avoid repetition)
 
 """
@@ -258,6 +267,30 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     return clamp((1 - P_odd + C) / 2, 0.0, 1.0)
 end
 
+function _varMS_sample_pops(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
+                             N::Int, numMS::Int,
+                             relative_phase::Float64, phase_drift::Float64)
+    N > 0 || throw(ArgumentError("N must be positive."))
+    setup = build_chamber()
+    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
+    tout = Float64[0.0, t]
+    state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
+    for gate_idx in 1:numMS
+        net_phase = (gate_idx - 1) * (relative_phase - phase_drift)
+        configure_lasers!(setup, f_cl, Δ, I, phi_1=net_phase, phi_2=0.0)
+        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
+        _, sol = timeevolution.schroedinger_dynamic(tout, state, h)
+        state = sol[end]
+    end
+    SS = real(expect(ionprojector(chamber, "S", "S"), state))
+    DD = real(expect(ionprojector(chamber, "D", "D"), state))
+    SD = real(expect(ionprojector(chamber, "S", "D"), state))
+    DS = real(expect(ionprojector(chamber, "D", "S"), state))
+    weights = _normalized_population_weights((SS, DD, SD, DS))
+    samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
+    return count(==(1), samples) / N, count(==(2), samples) / N
+end
+
 """
     Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, relative_phase=0.0, phase_drift=0.0) -> Float64
 
@@ -268,39 +301,29 @@ populations are inferred from `numMS`: odd counts target a balanced SS/DD readou
 function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
                  N::Int=1000, numMS::Int=2,
                  relative_phase::Float64=0.0, phase_drift::Float64=0.0)::Float64
-    N > 0 || throw(ArgumentError("N must be positive."))
+    P_SS, P_DD = _varMS_sample_pops(t, f_cl, Δ, I; N=N, numMS=numMS,
+                                     relative_phase=relative_phase, phase_drift=phase_drift)
     expected = _expected_ms_even_populations(numMS)
+    return clamp(1.0 - (abs(expected.SS - P_SS) + abs(expected.DD - P_DD)), 0.0, 1.0)
+end
 
-    setup = build_chamber()
-    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
-    tout = Float64[0.0, t]
-    state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
+function Q_varMS_σ(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
+                   N::Int=1000, numMS::Int=2,
+                   relative_phase::Float64=0.0, phase_drift::Float64=0.0)
+    P_SS, P_DD = _varMS_sample_pops(t, f_cl, Δ, I; N=N, numMS=numMS,
+                                     relative_phase=relative_phase, phase_drift=phase_drift)
+    expected = _expected_ms_even_populations(numMS)
+    Q = clamp(1.0 - (abs(expected.SS - P_SS) + abs(expected.DD - P_DD)), 0.0, 1.0)
+    return Q, sigma_binomial(Q, N)
+end
 
-    for gate_idx in 1:numMS
-        accumulated = (gate_idx - 1)
-        net_phase = accumulated * (relative_phase - phase_drift)
-        configure_lasers!(setup, f_cl, Δ, I,
-                          phi_1=net_phase,
-                          phi_2=0.0)
-        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
-        _, sol = timeevolution.schroedinger_dynamic(tout, state, h)
-        state = sol[end]
-    end
-
-    SS = real(expect(ionprojector(chamber, "S", "S"), state))
-    DD = real(expect(ionprojector(chamber, "D", "D"), state))
-    SD = real(expect(ionprojector(chamber, "S", "D"), state))
-    DS = real(expect(ionprojector(chamber, "D", "S"), state))
-
-    # Q_varMS sampling order: 1=SS, 2=DD, 3=SD, 4=DS.
-    weights = _normalized_population_weights((SS, DD, SD, DS))
-    samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
-
-    P_SS = count(==(1), samples) / N
-    P_DD = count(==(2), samples) / N
-
-    score = 1.0 - (abs(expected.SS - P_SS) + abs(expected.DD - P_DD))
-    return clamp(score, 0.0, 1.0)
+function Q_varMS_balance_σ(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
+                            N::Int=1000, numMS::Int=3,
+                            relative_phase::Float64=0.0, phase_drift::Float64=0.0)
+    P_SS, P_DD = _varMS_sample_pops(t, f_cl, Δ, I; N=N, numMS=numMS,
+                                     relative_phase=relative_phase, phase_drift=phase_drift)
+    Q = clamp(1.0 - (abs(0.5 - P_SS) + abs(0.5 - P_DD)), 0.0, 1.0)
+    return Q, sigma_delta(P_SS, P_DD, 0.5, 0.5, N)
 end
 
 """

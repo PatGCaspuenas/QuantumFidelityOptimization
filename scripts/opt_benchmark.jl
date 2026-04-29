@@ -56,6 +56,8 @@ try
     objective_mode   =           get(ENV, "BO_OBJECTIVE_MODE", "2ms")  # BO_OBJECTIVE_MODE=2ms/2ms_log/...
     # 4D mode: adds inter-gate phase φ as 4th optimization dimension
     use_4d           = get(ENV, "BO_USE_4D", "false") == "true"        # BO_USE_4D=true/false
+    # 2D mode: fix A and φ at center, vary only f_cl and f_sb
+    use_2d           = get(ENV, "BO_USE_2D", "false") == "true"        # BO_USE_2D=true/false
 
     _is_log_mode = objective_mode in ("2ms_log", "3ms_balance_log")
     _do_maximize = !_is_log_mode
@@ -93,6 +95,7 @@ try
     @everywhere const optimize_det     = $optimize_det
     @everywhere const _objective_mode  = $objective_mode
     @everywhere const _use_4d          = $use_4d
+    @everywhere const _use_2d          = $use_2d
     @everywhere const _is_log_mode     = $_is_log_mode
     @everywhere const _N_noisy_high    = $N_noisy_high
 
@@ -101,6 +104,7 @@ try
     @everywhere function u_to_params(u)
         fcl = f_cl0 + span_fcl * u[1]
         fsb = f_sb0 + span_fsb * u[2]
+        _use_2d && return (fcl, fsb, A0)
         A   = A0    + span_A   * u[3]
         _use_4d && return (fcl, fsb, A, span_phi * u[4])
         return (fcl, fsb, A)
@@ -108,43 +112,31 @@ try
 
     @everywhere function _eval_raw(fcl, fsb, A, N::Int; phi::Float64=0.0)
         if _objective_mode == "3ms_balance" || _objective_mode == "3ms_balance_log"
-            return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=3,
+            return CalibrationCode.Q_varMS_balance_σ(t, fcl, fsb, A; N=N, numMS=3,
                 relative_phase=phi, phase_drift=_phase_drift[])
         elseif _objective_mode == "jacobian"
-            return clamp(CalibrationCode.Q_ms_sequence(t, fcl, fsb, A, _jac_subgates;
+            return CalibrationCode.Q_ms_sequence_σ(t, fcl, fsb, A, _jac_subgates;
                 N=N, expected_gg=_jac_exp_gg, expected_ee=_jac_exp_ee,
-                relative_phase=phi, phase_drift=_phase_drift[]), 0.0, 1.0)
+                relative_phase=phi, phase_drift=_phase_drift[])
         elseif _use_4d
-            return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=2,
+            return CalibrationCode.Q_varMS_σ(t, fcl, fsb, A; N=N, numMS=2,
                 relative_phase=phi, phase_drift=_phase_drift[])
         else             # 2ms 3D (default)
-            optimize_det && return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
-            return CalibrationCode.Q_varMS(t, fcl, fsb, A; N=N, numMS=2)
+            optimize_det && return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0), 0.0
+            return CalibrationCode.Q_varMS_σ(t, fcl, fsb, A; N=N, numMS=2)
         end
-    end
-
-    @everywhere function _to_objective(F_raw::Float64)
-        F = clamp(F_raw, 0.0, 1.0)
-        _is_log_mode && return log10(max(1.0 - F, 1e-10))
-        return F
-    end
-
-    @everywhere function _sigma_for_objective(F_raw::Float64, N::Int)
-        optimize_det && return 0.0
-        F = clamp(F_raw, 0.0, 1.0)
-        σ_F = sqrt(max(F * (1.0 - F), 0.0) / N)
-        if _is_log_mode
-            infid = max(1.0 - F, 1e-10)
-            return σ_F / (infid * log(10))
-        end
-        return σ_F
     end
 
     @everywhere function Q_fun(u, N::Int)
         params = u_to_params(u)
         phi = _use_4d ? params[4] : 0.0
-        F_raw = _eval_raw(params[1], params[2], params[3], N; phi=phi)
-        return (_to_objective(F_raw), _sigma_for_objective(F_raw, N))
+        F_raw, σ_raw = _eval_raw(params[1], params[2], params[3], N; phi=phi)
+        F = clamp(F_raw, 0.0, 1.0)
+        if _is_log_mode
+            infid = max(1.0 - F, 1e-10)
+            return log10(infid), σ_raw / (infid * log(10))
+        end
+        return F, σ_raw
     end
 
     @everywhere function Q_true(u)
@@ -153,7 +145,8 @@ try
         return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
     end
 
-    bounds = use_4d ? [(-1.0,1.0),(-1.0,1.0),(-1.0,1.0),(-1.0,1.0)] :
+    bounds = use_2d ? [(-1.0,1.0),(-1.0,1.0)] :
+             use_4d ? [(-1.0,1.0),(-1.0,1.0),(-1.0,1.0),(-1.0,1.0)] :
                       [(-1.0,1.0),(-1.0,1.0),(-1.0,1.0)]
 
     α_bo = 1.5
@@ -175,11 +168,11 @@ try
         "lbfgs_grad(k=$k_acq,analytical)"
     end
 
-    optimization_mode = "$(objective_mode)$(use_4d ? "_4d" : "")$(optimize_det ? "_det" : "")"
+    optimization_mode = "$(objective_mode)$(use_2d ? "_2d" : use_4d ? "_4d" : "")$(optimize_det ? "_det" : "")"
 
     println("=== Starting Parallel Simulations (Random Seeds) ===")
-    println("Objective mode: $objective_mode, 4D: $use_4d, maximize: $_do_maximize")
-    println("N_shots = $N_shots, noise model = binomial")
+    println("Objective mode: $objective_mode, 2D: $use_2d, 4D: $use_4d, maximize: $_do_maximize")
+    println("N_shots = $N_shots, noise model = $(objective_mode in ("3ms_balance","3ms_balance_log","jacobian") ? "delta" : "binomial")")
     println("Fixed α = $α_bo, κ = $κ_bo")
     println("Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
     println("Fidelity threshold: $(fidelity_threshold_Q === nothing ? "none (fixed $n_iter iterations)" : "Q* = $fidelity_threshold_Q (linear)")")

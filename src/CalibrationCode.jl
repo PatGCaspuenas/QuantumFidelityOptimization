@@ -30,8 +30,10 @@ include("bayes_MF_opt.jl")          # N-fidelity augmented-input GP (z-levels)
 # -------------------------------
 
 # Estimators / calibration
-export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy, Q_varMS, Q_mc_varMS,
-       Q_ms_sequence, Q_ms_sequence_det, sequence_C_subgates
+export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy,
+       sigma_binomial, sigma_delta,
+       Q_varMS, Q_varMS_σ, Q_varMS_balance_σ, Q_mc_varMS,
+       Q_ms_sequence, Q_ms_sequence_det, Q_ms_sequence_σ, sequence_C_subgates
 
 # Homoscedastic BO
 export BOResult, bayesopt

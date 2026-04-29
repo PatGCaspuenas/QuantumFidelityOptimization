@@ -653,33 +653,34 @@ function _adaptive_measure(f, x::Vector{Float64},
                            threshold::Float64,
                            maximize::Bool,
                            batch_size::Int=50)
-    y1, _ = _call_f_raw(f, x, n_floor)
+    y1, σy1 = _call_f_raw(f, x, n_floor)
     Q_cur   = clamp(y1, 0.0, 1.0)
     k_total = Q_cur * Float64(n_floor)
     N_total = n_floor
 
     at_or_above = maximize ? (Q_cur >= threshold) : (Q_cur <= threshold)
     if !at_or_above
-        σy_f = sqrt(max(Q_cur * (1.0 - Q_cur), 0.0) / N_total)
-        return Q_cur, σy_f, N_total, false
+        return Q_cur, σy1, N_total, false
     end
 
+    σy_last = σy1
     while N_total < n_max
         Q_cur  = k_total / Float64(N_total)
         fell_below = maximize ? (Q_cur < threshold) : (Q_cur > threshold)
         fell_below && break
 
         Δ = min(batch_size, n_max - N_total)
-        y_new, _ = _call_f_raw(f, x, Δ)
+        y_new, σy_new = _call_f_raw(f, x, Δ)
         Q_new = clamp(y_new, 0.0, 1.0)
         k_total += Q_new * Float64(Δ)
         N_total += Δ
+        σy_last = σy_new
     end
 
     Q_final  = k_total / Float64(N_total)
     stop_loop = maximize ? (N_total >= n_max && Q_final >= threshold) :
                            (N_total >= n_max && Q_final <= threshold)
-    σy_final = sqrt(max(Q_final * (1.0 - Q_final), 0.0) / Float64(N_total))
+    σy_final = σy_last * sqrt(Float64(batch_size) / Float64(N_total))
 
     return Q_final, σy_final, N_total, stop_loop
 end
