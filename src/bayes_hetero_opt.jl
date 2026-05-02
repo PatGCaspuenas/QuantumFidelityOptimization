@@ -593,6 +593,47 @@ function _acquire_topk(gp::HeteroGP,
     return best_x, best_a
 end
 
+"""
+    _choose_N_shot(μ, s2, threshold; n_floor=50, n_max_shots=2000, η=0.5)
+
+Selects the number of shots for a candidate point using the GP posterior mean `μ`,
+posterior variance `s2`, and target `threshold`.
+
+The rule chooses the smallest `N` such that the binomial-style observation noise
+
+    sqrt(μ(1 - μ) / N)
+
+is at most `η` times the larger of:
+
+  - the GP posterior standard deviation, and
+  - the distance from the threshold.
+
+The returned value is clipped to `[n_floor, n_max_shots]`.
+"""
+function _choose_N_shot(μ::Float64,
+                        s2::Float64;
+                        n_floor::Int=50,
+                        n_max_shots::Int=2000,
+                        η::Float64=0.5,
+                        verbose::Bool=False)
+
+    n_floor ≥ 1 || throw(ArgumentError("n_floor must be ≥ 1"))
+    n_max_shots ≥ n_floor || throw(ArgumentError("n_max_shots must be ≥ n_floor"))
+    η > 0 || throw(ArgumentError("η must be > 0"))
+
+    q = clamp(μ, 1e-6, 1.0 - 1e-6)
+    scale = sqrt(max(s2, 0.0))
+    target_σ = η * scale
+
+    N_req = ceil(Int, q * (1.0 - q) / target_σ^2)
+
+    if verbose
+        @info "adaptive shot selection" μ=μ s=s threshold=threshold target_σ=target_σ N_req=N_req N=N
+    end
+
+    return clamp(N_req, n_floor, n_max_shots)
+end
+
 
 """
     recommend_mean(gp, bounds; M, k, min_sep, use_grad, rng) -> (x_rec, m_rec, s_rec)
@@ -750,6 +791,7 @@ function bayesopt_ucb_threshold(f;
                                learn_noise_scale::Bool=true,
                                n_restarts::Int=6,
                                use_variable_mode::Bool=false,
+                               decide_N_shot::Bool=false,
                                n_floor::Int=50,
                                n_max_shots::Int=2000,
                                # Acquisition options
@@ -761,7 +803,8 @@ function bayesopt_ucb_threshold(f;
                                M_zoom::Int=200,
                                zoom_radius::Float64=0.1,
                                use_lbfgs_acq::Bool=false,
-                               use_grad_acq::Bool=false)
+                               use_grad_acq::Bool=false,
+                               N_policy_η::Float64=0.1)
 
     _validate_bounds(bounds)
     n_init ≥ 1 || throw(ArgumentError("n_init must be ≥ 1"))
@@ -774,8 +817,18 @@ function bayesopt_ucb_threshold(f;
     n_floor ≥ 1 || throw(ArgumentError("n_floor must be ≥ 1"))
     n_max_shots ≥ n_floor || throw(ArgumentError("n_max_shots must be ≥ n_floor"))
     k_acq ≥ 1 || throw(ArgumentError("k_acq must be ≥ 1"))
-    (use_variable_mode && fidelity_threshold === nothing) &&
+
+    if use_variable_mode && decide_N_shot
+        throw(ArgumentError("use_variable_mode and decide_N_shot are mutually exclusive"))
+    end
+    
+    if use_variable_mode && fidelity_threshold === nothing
         throw(ArgumentError("fidelity_threshold required for use_variable_mode=true"))
+    end
+    
+    if (use_variable_mode || decide_N_shot) && n_max_shots < n_floor
+        throw(ArgumentError("n_max_shots must be ≥ n_floor"))
+    end
 
     rng_local = seed === nothing ? rng : MersenneTwister(seed)
 
@@ -830,11 +883,25 @@ function bayesopt_ucb_threshold(f;
                                         use_lbfgs_acq=use_lbfgs_acq,
                                         use_grad_acq=use_grad_acq,
                                         rng=rng_local)
+        if decide_N_shot
+            μ_acq, s2_acq = predict_latent(gp, best_x)
 
-        n_acq = use_variable_mode ? n_floor : n_shots
-
+            n_acq = _choose_N_shot(
+                μ_acq,
+                s2_acq;
+                n_floor=n_floor,
+                n_max_shots=n_max_shots,
+                η=N_policy_η,
+                verbose=verbose,
+            )
+        elseif use_variable_mode
+            n_acq = n_floor
+        else
+            n_acq = n_shots
+        end
         y_raw, σy_i = _call_f_raw(f, best_x, n_acq)
         total_shots_count += n_acq
+
         if _is_far_enough(best_x, X, write_idx)
             write_idx += 1
             X[:, write_idx] = best_x

@@ -42,9 +42,19 @@ try
     n_iter       = parse(Int,   get(ENV, "BO_N_ITER",      "120"))
     n_restarts   = parse(Int,   get(ENV, "BO_N_RESTARTS",  "10"))
 
-    use_variable_mode = get(ENV, "BO_VAR_N_MODE", "false") == "true"
-    n_floor           = parse(Int, get(ENV, "BO_N_FLOOR",  "50"))
-    n_max_shots       = parse(Int, get(ENV, "BO_N_MAX",  "2000"))
+    # Shot-allocation modes:
+    #   use_variable_mode = false, decide_N_shot = false
+    #       → fixed n_shots per acquisition
+    #   use_variable_mode = true
+    #       → evaluate acquisition points with n_floor;
+    #         adaptively measure x_rec and stop early if threshold is confirmed
+    #   decide_N_shot = true
+    #       → choose the number of shots for each acquisition point
+    #         from the GP posterior uncertainty and threshold distance
+    use_variable_mode = get(ENV, "BO_VAR_N_MODE", "false") == "true"        # BO_VAR_N_MODE=true/false
+    decide_N_shot     = get(ENV, "BO_DECIDE_N_SHOT", "false") == "true"    # BO_DECIDE_N_SHOT=true/false
+    n_floor          = parse(Int, get(ENV, "BO_N_FLOOR",  "50"))      # BO_N_FLOOR=50
+    n_max_shots      = parse(Int, get(ENV, "BO_N_MAX",  "2000"))      # BO_N_MAX=2000
 
     # Objective mode:
     #   "2ms"             → Q_varMS(numMS=2)              [default]
