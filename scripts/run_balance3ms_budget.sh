@@ -70,10 +70,10 @@ run_one() {
 }
 
 # N=400, 200 iterations, 2D (f_cl + f_sb only, A and phi fixed)
-run_one "2d"  12 200 400 "iter200"
+run_one "2d"  12 120 400 "iter120"
 
 # N=400, 200 iterations, 3D (f_cl + f_sb + A, phi fixed)
-run_one "3d"  12 200 400 "iter200"
+run_one "3d"  12 120 400 "iter120"
 
 echo ""
 echo "=========================================="

@@ -5,6 +5,8 @@ using Random
 using Statistics
 using LinearAlgebra
 using Optim
+using SpecialFunctions: erf
+using QuasiMonteCarlo
 
 # -------------------------
 # Kernel and covariance
@@ -370,6 +372,13 @@ struct HeteroBOResult
     σf_final::Float64                    # final GP signal std (original scale)
     c_final::Float64                     # final GP noise scale (original scale)
     total_shots::Int                      # total shots used across ALL f calls (incl. check calls not in X)
+    # Per-iteration trace (empty matrices/vectors when collect_trace=false)
+    x_acq_trace::Matrix{Float64}          # d × n_iters_run  — acquisition candidate selected each iter
+    x_rec_trace::Matrix{Float64}          # d × n_iters_run  — GP mean maximizer each iter
+    m_rec_trace::Vector{Float64}          # GP predicted mean at x_rec each iter
+    s_rec_trace::Vector{Float64}          # GP predicted std  at x_rec each iter
+    y_acq_trace::Vector{Float64}          # noisy f value at x_acq each iter
+    y_check_trace::Vector{Float64}        # noisy f at x_rec when queried (NaN otherwise)
 end
 
 @inline function _validate_bounds(bounds)
@@ -419,6 +428,30 @@ end
     σ < 1e-12 && return max(μ - f_best - ξ, 0.0)
     z = (μ - f_best - ξ) / σ
     return (μ - f_best - ξ) * _normal_cdf(z) + σ * _normal_pdf(z)
+end
+
+@inline ts_score(μ::Float64, σ::Float64, ε::Float64) = μ + σ * ε
+
+function mes_score(μ::Float64, σ::Float64, f_stars::Vector{Float64})
+    σ < 1e-12 && return 0.0
+    total = 0.0
+    @inbounds for f_star in f_stars
+        γ = (f_star - μ) / σ
+        total += _normal_pdf(γ) / max(_normal_cdf(γ), 1e-12) - γ
+    end
+    return total / length(f_stars)
+end
+
+# Gaussian KDE density at y given a subsample of reference points.
+# Used by us_ei to estimate p_μ(y) over the candidate pool.
+function _gaussian_kde_density(y::Float64, μ_sub::AbstractVector{Float64}, h::Float64)
+    total = 0.0
+    inv_h = 1.0 / h
+    @inbounds for m in μ_sub
+        z = (y - m) * inv_h
+        total += exp(-0.5 * z^2)
+    end
+    return total / (length(μ_sub) * h * 2.5066282746310002)  # /( n h √(2π) )
 end
 
 
@@ -521,6 +554,7 @@ function _acquire_topk(gp::HeteroGP,
                         acq_type::String="ucb",
                         f_best::Float64=0.0,
                         ξ_ei::Float64=0.0,
+                        feas_threshold::Float64=0.1,
                         M_acq::Int=5000,
                         k_acq::Int=1,
                         min_sep::Float64=0.05,
@@ -529,64 +563,117 @@ function _acquire_topk(gp::HeteroGP,
                         zoom_radius::Float64=0.1,
                         use_lbfgs_acq::Bool=false,
                         use_grad_acq::Bool=false,
+                        mes_n_samples::Int=50,
                         rng::Random.AbstractRNG=Random.default_rng())
 
-    _acq_score = if acq_type == "ei"
-        (μ, s2) -> ei_score(μ, s2, f_best, ξ_ei)
-    else
+    # Pure-random baseline: skip GP entirely and return a uniform random point
+    acq_type == "random" && return _rand_in_box(rng, lb, ub), 0.0
+
+    # Pointwise score closure — used for zoom/lbfgs refinement (EI for ei/us_ei/feas_ei, UCB otherwise)
+    _pt_score = acq_type ∈ ("ei", "us_ei", "feas_ei") ?
+        (μ, s2) -> ei_score(μ, s2, f_best, ξ_ei) :
         (μ, s2) -> ucb_score(μ, s2, κ)
-    end
 
-    # Step 1: random global candidates
-    cands  = [_rand_in_box(rng, lb, ub) for _ in 1:M_acq]
-    scores = Vector{Float64}(undef, M_acq)
+    # Step 1: generate candidates and precompute posterior moments for all
+    cands = [_rand_in_box(rng, lb, ub) for _ in 1:M_acq]
+    μs    = Vector{Float64}(undef, M_acq)
+    σs    = Vector{Float64}(undef, M_acq)
     for i in 1:M_acq
-        μ, s2 = predict_latent(gp, cands[i])
-        scores[i] = _acq_score(μ, s2)
+        μ_i, s2_i = predict_latent(gp, cands[i])
+        μs[i] = μ_i
+        σs[i] = sqrt(max(s2_i, 0.0))
     end
 
-    # Step 2: select top-k separated starting points
-    sel = _topk_separated(cands, scores, min(k_acq, M_acq), min_sep)
+    # Step 2: compute acquisition scores
+    scores = Vector{Float64}(undef, M_acq)
+    if acq_type == "ts"
+        for i in 1:M_acq
+            scores[i] = ts_score(μs[i], σs[i], randn(rng))
+        end
+    elseif acq_type == "mes"
+        # Sample mes_n_samples estimates of f* via decoupled TS over all candidates
+        f_stars = Vector{Float64}(undef, mes_n_samples)
+        for m in 1:mes_n_samples
+            f_m = -Inf
+            for i in 1:M_acq
+                f_s = μs[i] + σs[i] * randn(rng)
+                f_m < f_s && (f_m = f_s)
+            end
+            f_stars[m] = f_m
+        end
+        for i in 1:M_acq
+            scores[i] = mes_score(μs[i], σs[i], f_stars)
+        end
+    elseif acq_type == "us_ei"
+        # Output-weighted EI: a(x) = EI(x) / p_μ(μ(x))
+        # p_μ estimated via Gaussian KDE on a 500-point subsample of candidate means.
+        # Suppresses exploitation of common output regions (e.g. a broad false basin).
+        M_kde = min(M_acq, 500)
+        step  = max(1, M_acq ÷ M_kde)
+        μ_sub = μs[1:step:end]
+        μ_std = max(std(μ_sub), 1e-8)
+        kde_h = 1.06 * μ_std * length(μ_sub)^(-0.2)
+        for i in 1:M_acq
+            p_i     = _gaussian_kde_density(μs[i], μ_sub, kde_h)
+            scores[i] = ei_score(μs[i], σs[i]^2, f_best, ξ_ei) / max(p_i, 1e-20)
+        end
+    elseif acq_type == "feas_ei"
+        # Feasibility-weighted EI: a(x) = P(Q(x) > τ_feas) · EI(x)
+        # P(Q > τ) = Φ((μ - τ) / σ). Prevents wasted evaluations in flat Q≈0 regions:
+        # once the GP is confident a region is below τ_feas, its score → 0.
+        for i in 1:M_acq
+            p_feas    = _normal_cdf((μs[i] - feas_threshold) / max(σs[i], 1e-12))
+            scores[i] = p_feas * ei_score(μs[i], σs[i]^2, f_best, ξ_ei)
+        end
+    else
+        for i in 1:M_acq
+            scores[i] = _pt_score(μs[i], σs[i]^2)
+        end
+    end
 
+    # Step 3: select top-k separated starting points
+    sel = _topk_separated(cands, scores, min(k_acq, M_acq), min_sep)
     best_x = cands[sel[1]]
     best_a = scores[sel[1]]
 
-    # Step 3+4: zoom and/or L-BFGS from each selected start
-    for idx in sel
-        x0 = cands[idx]
-        a0 = scores[idx]
+    # Step 4: zoom and/or L-BFGS refinement (UCB/EI only; not meaningful for TS/MES)
+    if acq_type ∉ ("ts", "mes")
+        for idx in sel
+            x0 = cands[idx]
+            a0 = scores[idx]
 
-        if use_zoom
-            zoom_best_x = x0
-            zoom_best_a = a0
-            width = ub .- lb
-            for _ in 1:M_zoom
-                xz = clamp.(x0 .+ zoom_radius .* (2 .* rand(rng, length(lb)) .- 1) .* width, lb, ub)
-                μz, s2z = predict_latent(gp, xz)
-                az = _acq_score(μz, s2z)
-                if az > zoom_best_a
-                    zoom_best_a = az
-                    zoom_best_x = xz
+            if use_zoom
+                zoom_best_x = x0
+                zoom_best_a = a0
+                width = ub .- lb
+                for _ in 1:M_zoom
+                    xz = clamp.(x0 .+ zoom_radius .* (2 .* rand(rng, length(lb)) .- 1) .* width, lb, ub)
+                    μz, s2z = predict_latent(gp, xz)
+                    az = _pt_score(μz, s2z)
+                    if az > zoom_best_a
+                        zoom_best_a = az
+                        zoom_best_x = xz
+                    end
                 end
+                x0 = zoom_best_x
+                a0 = zoom_best_a
             end
-            x0 = zoom_best_x
-            a0 = zoom_best_a
-        end
 
-        if use_lbfgs_acq && acq_type == "ucb"
-            x_opt = try
-                _acq_lbfgs(gp, x0, lb, ub, κ; use_grad=use_grad_acq)
-            catch
-                x0
+            if use_lbfgs_acq && acq_type == "ucb"
+                x_opt = try
+                    _acq_lbfgs(gp, x0, lb, ub, κ; use_grad=use_grad_acq)
+                catch
+                    x0
+                end
+                μ_opt, s2_opt = predict_latent(gp, x_opt)
+                a0 = _pt_score(μ_opt, s2_opt)
+                x0 = x_opt
             end
-            μ_opt, s2_opt = predict_latent(gp, x_opt)
-            a0 = _acq_score(μ_opt, s2_opt)
-            x0 = x_opt
-        end
 
-        if a0 > best_a
-            best_a = a0
-            best_x = x0
+            if a0 > best_a
+                best_a = a0
+                best_x = x0
+            end
         end
     end
 
@@ -755,13 +842,21 @@ function bayesopt_ucb_threshold(f;
                                # Acquisition options
                                acq_type::String="ucb",
                                ξ_ei::Float64=0.0,
+                               mes_n_samples::Int=50,
+                               feas_threshold::Float64=0.1,
                                k_acq::Int=1,
+                               # Initial design
+                               init_method::String="random",
                                min_sep::Float64=0.05,
                                use_zoom::Bool=false,
                                M_zoom::Int=200,
                                zoom_radius::Float64=0.1,
                                use_lbfgs_acq::Bool=false,
-                               use_grad_acq::Bool=false)
+                               use_grad_acq::Bool=false,
+                               # Early-stopping mode: "two_checks" | "lcb" | "mu_one_check"
+                               stop_mode::String="two_checks",
+                               # Per-iteration trace: x_acq, x_rec, m_rec, y_acq, y_check
+                               collect_trace::Bool=false)
 
     _validate_bounds(bounds)
     n_init ≥ 1 || throw(ArgumentError("n_init must be ≥ 1"))
@@ -779,6 +874,7 @@ function bayesopt_ucb_threshold(f;
 
     rng_local = seed === nothing ? rng : MersenneTwister(seed)
 
+    κ_stop = 1.645
     lb = Float64[b[1] for b in bounds]
     ub = Float64[b[2] for b in bounds]
 
@@ -790,8 +886,15 @@ function bayesopt_ucb_threshold(f;
     write_idx         = 0
     total_shots_count = 0
 
+    init_pts = if init_method == "sobol"
+        QuasiMonteCarlo.sample(n_init, lb, ub, QuasiMonteCarlo.SobolSample())
+    elseif init_method == "lhs"
+        QuasiMonteCarlo.sample(n_init, lb, ub, QuasiMonteCarlo.LatinHypercubeSample())
+    else
+        hcat([_rand_in_box(rng_local, lb, ub) for _ in 1:n_init]...)
+    end
     for i in 1:n_init
-        x = _rand_in_box(rng_local, lb, ub)
+        x = init_pts[:, i]
         y_raw, σy_i = _call_f_raw(f, x, n_shots)
         total_shots_count += n_shots
         write_idx += 1
@@ -803,6 +906,20 @@ function bayesopt_ucb_threshold(f;
     θ_prev = nothing
     n_iter_actual = n_iter
     y_last_val = 0.0
+
+    # Helper to slice trace arrays up to iteration `n` for early returns
+    _tr_mat(m, n) = collect_trace ? m[:, 1:n] : zeros(0, 0)
+    _tr_vec(v, n) = collect_trace ? v[1:n]    : Float64[]
+
+    # Trace preallocations (empty when not collecting)
+    collect_trace && fidelity_threshold === nothing &&
+        throw(ArgumentError("collect_trace requires fidelity_threshold to be set"))
+    x_acq_tr = collect_trace ? Matrix{Float64}(undef, d, n_iter) : zeros(0, 0)
+    x_rec_tr  = collect_trace ? Matrix{Float64}(undef, d, n_iter) : zeros(0, 0)
+    m_rec_tr  = collect_trace ? Vector{Float64}(undef, n_iter)    : Float64[]
+    s_rec_tr  = collect_trace ? Vector{Float64}(undef, n_iter)    : Float64[]
+    y_acq_tr  = collect_trace ? Vector{Float64}(undef, n_iter)    : Float64[]
+    y_chk_tr  = collect_trace ? fill(NaN, n_iter)                 : Float64[]
 
     for it in 1:n_iter
         do_opt = (it == 1) || (hyper_every > 0 && it % hyper_every == 0)
@@ -816,11 +933,12 @@ function bayesopt_ucb_threshold(f;
                           rng=rng_local)
         θ_prev = gp.θ
 
-        f_best_cur = acq_type == "ei" ? maximum(y[1:write_idx]) : 0.0
+        f_best_cur = acq_type ∈ ("ei", "us_ei", "feas_ei") ? maximum(y[1:write_idx]) : 0.0
         best_x, best_a = _acquire_topk(gp, lb, ub, κ;
                                         acq_type=acq_type,
                                         f_best=f_best_cur,
                                         ξ_ei=ξ_ei,
+                                        feas_threshold=feas_threshold,
                                         M_acq=M_acq,
                                         k_acq=k_acq,
                                         min_sep=min_sep,
@@ -829,6 +947,7 @@ function bayesopt_ucb_threshold(f;
                                         zoom_radius=zoom_radius,
                                         use_lbfgs_acq=use_lbfgs_acq,
                                         use_grad_acq=use_grad_acq,
+                                        mes_n_samples=mes_n_samples,
                                         rng=rng_local)
 
         n_acq = use_variable_mode ? n_floor : n_shots
@@ -842,6 +961,11 @@ function bayesopt_ucb_threshold(f;
             σy[write_idx] = σy_i
         end
         y_last_val = maximize ? y_raw : -y_raw
+
+        if collect_trace
+            x_acq_tr[:, it] = best_x
+            y_acq_tr[it]    = y_raw
+        end
 
         if verbose
             @info "it=$it best_acq=$best_a"
@@ -867,37 +991,98 @@ function bayesopt_ucb_threshold(f;
                                       bounds, n_shots, n_init, n_iter, maximize,
                                       x_rec_cur, y_rec_cur, n_iter_actual,
                                       maximize ? y_last_val : -y_last_val,
-                                      gp.ℓ, gp.σf, gp.c, total_shots_count)
+                                      gp.ℓ, gp.σf, gp.c, total_shots_count,
+                                      zeros(0,0), zeros(0,0), Float64[], Float64[], Float64[], Float64[])
             end
         end
 
         if fidelity_threshold !== nothing && !use_variable_mode
-            x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, k=k_acq, min_sep=min_sep, use_grad=use_grad_acq, rng=rng_local)
-            y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
-            total_shots_count += n_shots
-            if _is_far_enough(x_rec_cur, X, write_idx)
-                write_idx += 1
-                X[:, write_idx] = x_rec_cur
-                y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
-                σy[write_idx] = σy1_i
+            x_rec_cur, m_rec, s_rec = recommend_mean(gp, bounds; M=M_rec, k=k_acq, min_sep=min_sep, use_grad=use_grad_acq, rng=rng_local)
+
+            if collect_trace
+                x_rec_tr[:, it] = x_rec_cur
+                m_rec_tr[it]    = maximize ? m_rec : -m_rec
+                s_rec_tr[it]    = s_rec
             end
 
-            y1 = maximize ? y_rec_cur : -y_rec_cur
-            reached1 = maximize ? (y1 >= fidelity_threshold) : (y1 <= fidelity_threshold)
-            if reached1
-                y2_raw, _ = _call_f_raw(f, x_rec_cur, n_shots)
-                total_shots_count += n_shots
-                y2 = maximize ? y2_raw : -y2_raw
-                reached2 = maximize ? (y2 >= fidelity_threshold) : (y2 <= fidelity_threshold)
-                if reached2
+            if stop_mode == "lcb"
+                # Stop when GP lower-confidence bound exceeds threshold (no f-call needed)
+                lcb = maximize ? (m_rec - κ_stop * s_rec) : (m_rec + κ_stop * s_rec)
+                lcb_reached = maximize ? (lcb >= fidelity_threshold) : (lcb <= fidelity_threshold)
+                if lcb_reached
                     n_iter_actual = it
-                    y_rec_avg = (y_rec_cur + y2_raw) / 2
                     y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
                     return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
                                           bounds, n_shots, n_init, n_iter, maximize,
-                                          x_rec_cur, y_rec_avg, n_iter_actual,
+                                          x_rec_cur, maximize ? m_rec : -m_rec, n_iter_actual,
                                           maximize ? y_last_val : -y_last_val,
-                                          gp.ℓ, gp.σf, gp.c, total_shots_count)
+                                          gp.ℓ, gp.σf, gp.c, total_shots_count,
+                                          _tr_mat(x_acq_tr, it), _tr_mat(x_rec_tr, it),
+                                          _tr_vec(m_rec_tr, it), _tr_vec(s_rec_tr, it),
+                                          _tr_vec(y_acq_tr, it), _tr_vec(y_chk_tr, it))
+                end
+
+            elseif stop_mode == "mu_one_check"
+                # Stop when GP mean exceeds threshold AND one f-call confirms it
+                mu_reached = maximize ? (m_rec >= fidelity_threshold) : (m_rec <= fidelity_threshold)
+                if mu_reached
+                    y_chk, σy_chk = _call_f_raw(f, x_rec_cur, n_shots)
+                    total_shots_count += n_shots
+                    collect_trace && (y_chk_tr[it] = y_chk)
+                    # Always add to training set
+                    if _is_far_enough(x_rec_cur, X, write_idx)
+                        write_idx += 1
+                        X[:, write_idx] = x_rec_cur
+                        y[write_idx]  = maximize ? y_chk : -y_chk
+                        σy[write_idx] = σy_chk
+                    end
+                    y_chk_signed = maximize ? y_chk : -y_chk
+                    chk_reached  = maximize ? (y_chk_signed >= fidelity_threshold) : (y_chk_signed <= fidelity_threshold)
+                    if chk_reached
+                        n_iter_actual = it
+                        y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
+                        return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
+                                              bounds, n_shots, n_init, n_iter, maximize,
+                                              x_rec_cur, y_chk, n_iter_actual,
+                                              maximize ? y_last_val : -y_last_val,
+                                              gp.ℓ, gp.σf, gp.c, total_shots_count,
+                                              _tr_mat(x_acq_tr, it), _tr_mat(x_rec_tr, it),
+                                              _tr_vec(m_rec_tr, it), _tr_vec(s_rec_tr, it),
+                                              _tr_vec(y_acq_tr, it), _tr_vec(y_chk_tr, it))
+                    end
+                end
+
+            else  # "two_checks" (default)
+                y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
+                total_shots_count += n_shots
+                collect_trace && (y_chk_tr[it] = y_rec_cur)
+                if _is_far_enough(x_rec_cur, X, write_idx)
+                    write_idx += 1
+                    X[:, write_idx] = x_rec_cur
+                    y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
+                    σy[write_idx] = σy1_i
+                end
+
+                y1 = maximize ? y_rec_cur : -y_rec_cur
+                reached1 = maximize ? (y1 >= fidelity_threshold) : (y1 <= fidelity_threshold)
+                if reached1
+                    y2_raw, _ = _call_f_raw(f, x_rec_cur, n_shots)
+                    total_shots_count += n_shots
+                    y2 = maximize ? y2_raw : -y2_raw
+                    reached2 = maximize ? (y2 >= fidelity_threshold) : (y2 <= fidelity_threshold)
+                    if reached2
+                        n_iter_actual = it
+                        y_rec_avg = (y_rec_cur + y2_raw) / 2
+                        y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
+                        return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
+                                              bounds, n_shots, n_init, n_iter, maximize,
+                                              x_rec_cur, y_rec_avg, n_iter_actual,
+                                              maximize ? y_last_val : -y_last_val,
+                                              gp.ℓ, gp.σf, gp.c, total_shots_count,
+                                              _tr_mat(x_acq_tr, it), _tr_mat(x_rec_tr, it),
+                                              _tr_vec(m_rec_tr, it), _tr_vec(s_rec_tr, it),
+                                              _tr_vec(y_acq_tr, it), _tr_vec(y_chk_tr, it))
+                    end
                 end
             end
         end
@@ -921,5 +1106,8 @@ function bayesopt_ucb_threshold(f;
 
     return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx], bounds, n_shots,
                           n_init, n_iter, maximize, x_rec, y_rec_raw, n_iter_actual,
-                          y_last_out, gp.ℓ, gp.σf, gp.c, total_shots_count)
+                          y_last_out, gp.ℓ, gp.σf, gp.c, total_shots_count,
+                          _tr_mat(x_acq_tr, n_iter), _tr_mat(x_rec_tr, n_iter),
+                          _tr_vec(m_rec_tr, n_iter), _tr_vec(s_rec_tr, n_iter),
+                          _tr_vec(y_acq_tr, n_iter), _tr_vec(y_chk_tr, n_iter))
 end

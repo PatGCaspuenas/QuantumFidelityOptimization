@@ -8,6 +8,7 @@ using LinearAlgebra
 using Logging
 
 using IonSim, QuantumOptics, StatsBase
+using SpecialFunctions: erf
 const pc = IonSim.PhysicalConstants
 
 # --- Physics / estimators (IonSim + QuantumOptics live in calibration.jl) ---

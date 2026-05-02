@@ -168,6 +168,15 @@ function refine_bell_ms_sequence_omega_ratio(t, f_cl, Δ, I_pi2,
     return (ratio=best_ratio, fid=best_fid)
 end
 
+# Bias correction for |d + ε| where ε ~ N(0, σ²), d = |measured - reference| ≥ 0.
+# Returns E[|d+ε|] - d, the systematic upward bias in the absolute-deviation estimator.
+# Largest (= σ√(2/π)) at d=0 (true optimum) and decays to 0 as d ≫ σ.
+@inline function _folded_bias(d::Float64, σ::Float64)::Float64
+    σ < 1e-15 && return 0.0
+    z = d / σ
+    return σ * sqrt(2.0 / π) * exp(-0.5 * z^2) - d * (1.0 - erf(z / sqrt(2.0)))
+end
+
 function Q_ms_sequence_det(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
                            subgates::AbstractVector{<:MSSubgate};
                            relative_phase::Float64=0.0,
@@ -185,7 +194,8 @@ function Q_ms_sequence(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
                        expected_gg::Float64=NaN,
                        expected_ee::Float64=NaN,
                        relative_phase::Float64=0.0,
-                       phase_drift::Float64=0.0)::Float64
+                       phase_drift::Float64=0.0,
+                       debias::Bool=false)::Float64
     pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
                                            relative_phase=relative_phase,
                                            phase_drift=phase_drift)
@@ -196,7 +206,14 @@ function Q_ms_sequence(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
     P_SS = count(==(1), samples) / N
     P_DD = count(==(2), samples) / N
     if !isnan(expected_gg)
-        return 1.0 - (abs(expected_gg - P_SS) + abs(expected_ee - P_DD))
+        Q = 1.0 - (abs(expected_gg - P_SS) + abs(expected_ee - P_DD))
+        if debias
+            σ_gg = sqrt(max(P_SS * (1.0 - P_SS), 0.0) / N)
+            σ_ee = sqrt(max(P_DD * (1.0 - P_DD), 0.0) / N)
+            Q += _folded_bias(abs(expected_gg - P_SS), σ_gg) +
+                 _folded_bias(abs(expected_ee - P_DD), σ_ee)
+        end
+        return Q
     end
     return P_SS + P_DD
 end
@@ -207,7 +224,8 @@ function Q_ms_sequence_σ(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
                          expected_gg::Float64=NaN,
                          expected_ee::Float64=NaN,
                          relative_phase::Float64=0.0,
-                         phase_drift::Float64=0.0)
+                         phase_drift::Float64=0.0,
+                         debias::Bool=false)
     pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
                                            relative_phase=relative_phase,
                                            phase_drift=phase_drift)
@@ -218,7 +236,14 @@ function Q_ms_sequence_σ(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
     P_SS = count(==(1), samples) / N
     P_DD = count(==(2), samples) / N
     if !isnan(expected_gg)
-        Q = clamp(1.0 - (abs(expected_gg - P_SS) + abs(expected_ee - P_DD)), 0.0, 1.0)
+        d_gg = abs(expected_gg - P_SS)
+        d_ee = abs(expected_ee - P_DD)
+        Q = clamp(1.0 - d_gg - d_ee, 0.0, 1.0)
+        if debias
+            σ_gg = sqrt(max(P_SS * (1.0 - P_SS), 0.0) / N)
+            σ_ee = sqrt(max(P_DD * (1.0 - P_DD), 0.0) / N)
+            Q = clamp(Q + _folded_bias(d_gg, σ_gg) + _folded_bias(d_ee, σ_ee), 0.0, 1.0)
+        end
         return Q, sigma_delta(P_SS, P_DD, expected_gg, expected_ee, N)
     end
     Q = clamp(P_SS + P_DD, 0.0, 1.0)
