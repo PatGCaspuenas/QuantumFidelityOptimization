@@ -19,75 +19,26 @@ try
         Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
         include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
         using Random
-        using LinearAlgebra
-        BLAS.set_num_threads(1)   # single-threaded BLAS for deterministic Cholesky
     end
 
-    # true  → optimize Q_det (deterministic, no shots); false → optimize noisy Q
-    optimize_det      = get(ENV, "BO_OPT_DET",   "false") == "true"
-    N_shots           = parse(Int, get(ENV, "BO_N_SHOTS",    "400"))
-    n_initial_samples = parse(Int, get(ENV, "BO_N_INIT",   "12"))
-    hyper_every       = parse(Int, get(ENV, "BO_HYPER_EVERY","10"))
-    num_sims          = parse(Int, get(ENV, "BO_NUM_SIMS",  "3"))
-    output_file_name  =           get(ENV, "BO_OUTPUT_FILE", "benchmark_results.txt")
+    optimize_det      = get(ENV, "BO_OPT_DET",      "false") == "true"
+    N_shots           = parse(Int, get(ENV, "BO_N_SHOTS",     "400"))
+    n_initial_samples = parse(Int, get(ENV, "BO_N_INIT",      "12"))
+    hyper_every       = parse(Int, get(ENV, "BO_HYPER_EVERY", "10"))
+    num_sims          = parse(Int, get(ENV, "BO_NUM_SIMS",    "3"))
+    output_file_name  =           get(ENV, "BO_OUTPUT_FILE",  "benchmark_results.txt")
+    n_iter            = parse(Int, get(ENV, "BO_N_ITER",      "120"))
+    n_restarts        = parse(Int, get(ENV, "BO_N_RESTARTS",  "10"))
 
     # Early-stopping threshold: "0.998" | "auto" (1-1/N) | "" (none)
     _thresh_env = get(ENV, "BO_THRESH_Q", "")
-    fidelity_threshold_Q = if isempty(_thresh_env)
+    fidelity_threshold = if isempty(_thresh_env)
         nothing
     elseif _thresh_env == "auto"
         1.0 - 1.0 / N_shots
     else
         parse(Float64, _thresh_env)
     end
-
-    n_iter       = parse(Int,   get(ENV, "BO_N_ITER",      "120"))
-    n_restarts   = parse(Int,   get(ENV, "BO_N_RESTARTS",  "10"))
-
-    use_variable_mode = get(ENV, "BO_VAR_N_MODE", "false") == "true"
-    n_floor           = parse(Int, get(ENV, "BO_N_FLOOR",  "50"))
-    n_max_shots       = parse(Int, get(ENV, "BO_N_MAX",  "2000"))
-
-    # Objective mode:
-    #   "2ms"             → Q_varMS(numMS=2)              [default]
-    #   "3ms"             → Q_varMS(numMS=3)
-    #   "2ms_log"         → Q_varMS(numMS=2), minimize log10(1-F)
-    #   "3ms_balance"     → Q_varMS(numMS=3), maximize expected-population score
-    #   "3ms_balance_log" → Q_varMS(numMS=3), minimize log10(1-F)
-    #   "jacobian"        → Q_ms_sequence with searched subgates, maximize
-    objective_mode   =           get(ENV, "BO_OBJECTIVE_MODE", "2ms")  # BO_OBJECTIVE_MODE=2ms/2ms_log/...
-    # 4D mode: adds inter-gate phase φ as 4th optimization dimension
-    use_4d           = get(ENV, "BO_USE_4D", "false") == "true"        # BO_USE_4D=true/false
-    # 2D mode: fix A and φ at center, vary only f_cl and f_sb
-    use_2d           = get(ENV, "BO_USE_2D", "false") == "true"        # BO_USE_2D=true/false
-
-    _is_log_mode = objective_mode in ("2ms_log", "3ms_balance_log")
-    _do_maximize = !_is_log_mode
-
-    # Acquisition configuration
-    k_acq         = parse(Int,   get(ENV, "BO_K_ACQ",          "1"))
-    min_sep       = parse(Float64, get(ENV, "BO_MIN_SEP",       "0.05"))
-    use_zoom      = get(ENV, "BO_USE_ZOOM",      "false") == "true"
-    M_zoom        = parse(Int,   get(ENV, "BO_M_ZOOM",          "200"))
-    zoom_radius   = parse(Float64, get(ENV, "BO_ZOOM_RADIUS",   "0.1"))
-    use_lbfgs_acq = get(ENV, "BO_USE_LBFGS_ACQ", "false") == "true"
-    use_grad_acq  = get(ENV, "BO_USE_GRAD_ACQ",  "false") == "true"
-    acq_type      =            get(ENV, "BO_ACQ_TYPE",      "ucb")
-    ξ_ei          = parse(Float64, get(ENV, "BO_XI_EI",     "0.0"))
-    mes_n_samples   = parse(Int,     get(ENV, "BO_MES_N",         "50"))
-    feas_threshold  = parse(Float64, get(ENV, "BO_FEAS_THRESH",   "0.1"))
-    stop_mode       =                get(ENV, "BO_STOP_MODE",     "two_checks")
-    debias_jac      = get(ENV, "BO_DEBIAS_JAC", "false") == "true"
-    init_method     =                get(ENV, "BO_INIT_METHOD",   "random")
-    log_trace       = get(ENV, "BO_LOG_TRACE",   "false") == "true"   # BO_LOG_TRACE=true/false
-
-    # Restrict parameter ranges: BO_*_BOUND in (0,1] → u ∈ [-bound, +bound]
-    a_bound   = clamp(parse(Float64, get(ENV, "BO_A_BOUND",   "1.0")), 1e-3, 1.0)
-    fcl_bound = clamp(parse(Float64, get(ENV, "BO_FCL_BOUND", "1.0")), 1e-3, 1.0)
-    fsb_bound = clamp(parse(Float64, get(ENV, "BO_FSB_BOUND", "1.0")), 1e-3, 1.0)
-
-    # High-N Q_noisy evaluation at x_rec after BO (benchmark metric)
-    N_noisy_high = parse(Int, get(ENV, "BO_Q_NOISY_N", "100000"))
 
     t = 100.0
     base = CalibrationCode.ideal(t)
@@ -97,143 +48,44 @@ try
     span_fcl = span_kHz * 1e3 * 2π
     span_fsb = span_kHz * 1e3 * 2π
     span_A   = 1.2 * A0 - A0
-    span_phi = π / 10
 
-    @everywhere const t        = $t
-    @everywhere const f_cl0    = $f_cl0
-    @everywhere const f_sb0    = $f_sb0
-    @everywhere const A0       = $A0
-    @everywhere const span_fcl = $span_fcl
-    @everywhere const span_fsb = $span_fsb
-    @everywhere const span_A   = $span_A
-    @everywhere const span_phi = $span_phi
-    @everywhere const optimize_det     = $optimize_det
-    @everywhere const _objective_mode  = $objective_mode
-    @everywhere const _use_4d          = $use_4d
-    @everywhere const _use_2d          = $use_2d
-    @everywhere const _is_log_mode     = $_is_log_mode
-    @everywhere const _N_noisy_high    = $N_noisy_high
-
-    @everywhere const _phase_drift = Ref(0.0)
-
-    # Jacobian mode: load pre-searched subgate sequence and compute expected populations
-    if objective_mode == "jacobian"
-        _jac_path = joinpath(@__DIR__, "..", "data", "ms_sequence_search_result.jl")
-        isfile(_jac_path) || error("Jacobian mode requires data/ms_sequence_search_result.jl — run the subgate search first.")
-        _jac_raw      = include(_jac_path)
-        _jac_subgates_local = [CalibrationCode.MSSubgate(sg.theta, sg.phi)
-                                for sg in _jac_raw.best_overall.subgates]
-        _I_center     = Float64(_jac_raw.I_center)
-        _jac_pulses   = CalibrationCode.build_closed_loop_ms_sequence(
-                            t, f_cl0, f_sb0, _I_center, _jac_subgates_local)
-        _jac_pops     = CalibrationCode.populations_ms_sequence(_jac_pulses)
-        _jac_exp_gg_local = Float64(_jac_pops.gg)
-        _jac_exp_ee_local = Float64(_jac_pops.ee)
-        println("Jacobian subgates loaded: $(length(_jac_subgates_local)) subgates, " *
-                "expected_gg=$(round(_jac_exp_gg_local, digits=5)), " *
-                "expected_ee=$(round(_jac_exp_ee_local, digits=5))")
-        @everywhere const _jac_subgates = $(_jac_subgates_local)
-        @everywhere const _jac_exp_gg   = $(_jac_exp_gg_local)
-        @everywhere const _jac_exp_ee   = $(_jac_exp_ee_local)
-    else
-        @everywhere const _jac_subgates = CalibrationCode.MSSubgate[]
-        @everywhere const _jac_exp_gg   = NaN
-        @everywhere const _jac_exp_ee   = NaN
-    end
+    @everywhere const t             = $t
+    @everywhere const f_cl0         = $f_cl0
+    @everywhere const f_sb0         = $f_sb0
+    @everywhere const A0            = $A0
+    @everywhere const span_fcl      = $span_fcl
+    @everywhere const span_fsb      = $span_fsb
+    @everywhere const span_A        = $span_A
+    @everywhere const optimize_det  = $optimize_det
+    @everywhere const _obj_mode     = $objective_mode
 
     @everywhere function u_to_params(u)
-        fcl = f_cl0 + span_fcl * u[1]
-        fsb = f_sb0 + span_fsb * u[2]
-        _use_2d && return (fcl, fsb, A0)
-        A   = A0    + span_A   * u[3]
-        _use_4d && return (fcl, fsb, A, span_phi * u[4])
-        return (fcl, fsb, A)
-    end
-
-    @everywhere function _eval_raw(fcl, fsb, A, N::Int; phi::Float64=0.0)
-        if _objective_mode == "3ms_balance" || _objective_mode == "3ms_balance_log"
-            return CalibrationCode.Q_varMS_balance_σ(t, fcl, fsb, A; N=N, numMS=3,
-                relative_phase=phi, phase_drift=_phase_drift[])
-        elseif _objective_mode == "jacobian"
-            return CalibrationCode.Q_ms_sequence_σ(t, fcl, fsb, A, _jac_subgates;
-                N=N, expected_gg=_jac_exp_gg, expected_ee=_jac_exp_ee,
-                relative_phase=phi, phase_drift=_phase_drift[],
-                debias=$debias_jac)
-        elseif _use_4d
-            return CalibrationCode.Q_varMS_σ(t, fcl, fsb, A; N=N, numMS=2,
-                relative_phase=phi, phase_drift=_phase_drift[])
-        else             # 2ms 3D (default)
-            optimize_det && return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0), 0.0
-            return CalibrationCode.Q_varMS_σ(t, fcl, fsb, A; N=N, numMS=2)
-        end
+        return (f_cl0 + span_fcl * u[1],
+                f_sb0 + span_fsb * u[2],
+                A0    + span_A   * u[3])
     end
 
     @everywhere function Q_fun(u, N::Int)
-        params = u_to_params(u)
-        phi = _use_4d ? params[4] : 0.0
-        F_raw, σ_raw = _eval_raw(params[1], params[2], params[3], N; phi=phi)
-        F = clamp(F_raw, 0.0, 1.0)
-        if _is_log_mode
-            infid = max(1.0 - F, 1e-10)
-            return log10(infid), σ_raw / (infid * log(10))
-        end
-        return F, σ_raw
+        fcl, fsb, A = u_to_params(u)
+        optimize_det && return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0), 0.0
+        F, σ = CalibrationCode.Q_varMS_σ(t, fcl, fsb, A; N=N, numMS=2)
+        return clamp(F, 0.0, 1.0), σ
     end
 
-    @everywhere function Q_true(u)
-        params = u_to_params(u)
-        fcl, fsb, A = params[1], params[2], params[3]
-        return clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
-    end
+    bounds = [(-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0)]
 
-    bounds = use_2d ? [(-fcl_bound,fcl_bound),(-fsb_bound,fsb_bound)] :
-             use_4d ? [(-fcl_bound,fcl_bound),(-fsb_bound,fsb_bound),(-a_bound,a_bound),(-1.0,1.0)] :
-                      [(-fcl_bound,fcl_bound),(-fsb_bound,fsb_bound),(-a_bound,a_bound)]
+    α_bo = 1.5
+    κ_bo = 1.9
 
-    α_bo = parse(Float64, get(ENV, "BO_ALPHA", "1.5"))
-    κ_bo = parse(Float64, get(ENV, "BO_KAPPA", "1.9"))
-
-    fidelity_threshold = if _is_log_mode && fidelity_threshold_Q !== nothing
-        log10(max(1.0 - fidelity_threshold_Q, 1e-10))
-    else
-        fidelity_threshold_Q
-    end
-
-    acq_label = if acq_type == "ts"
-        "ts(k=$k_acq)"
-    elseif acq_type == "mes"
-        "mes(k=$k_acq,M=$mes_n_samples)"
-    elseif acq_type == "ei"
-        "ei(k=$k_acq,ξ=$ξ_ei)"
-    elseif acq_type == "us_ei"
-        "us_ei(k=$k_acq,ξ=$ξ_ei)"
-    elseif acq_type == "feas_ei"
-        "feas_ei(k=$k_acq,τ=$feas_threshold,ξ=$ξ_ei)"
-    elseif !use_lbfgs_acq && !use_zoom
-        "ucb(k=$k_acq,random)"
-    elseif use_zoom && !use_lbfgs_acq
-        "zoom(k=$k_acq,r=$zoom_radius,M=$M_zoom)"
-    elseif use_lbfgs_acq && !use_grad_acq
-        "lbfgs(k=$k_acq,finite_diff)"
-    else
-        "lbfgs_grad(k=$k_acq,analytical)"
-    end
-    init_label = init_method != "random" ? ",init=$init_method" : ""
-    a_bound_label = (fcl_bound < 1.0 ? ",fcl_bound=$fcl_bound" : "") *
-                    (fsb_bound < 1.0 ? ",fsb_bound=$fsb_bound" : "") *
-                    (a_bound   < 1.0 ? ",A_bound=$a_bound"     : "")
-
-    optimization_mode = "$(objective_mode)$(use_2d ? "_2d" : use_4d ? "_4d" : "")$(optimize_det ? "_det" : "")"
+    noise_model    = objective_mode == "3ms_balance" ? "delta" : "binomial"
+    a_bound_label  = a_bound < 1.0 ? ", u_A ∈ [$(-a_bound), $a_bound]" : ""
 
     println("=== Starting Parallel Simulations (Random Seeds) ===")
-    println("Objective mode: $objective_mode, 2D: $use_2d, 4D: $use_4d, maximize: $_do_maximize")
-    println("N_shots = $N_shots, noise model = $(objective_mode in ("3ms_balance","3ms_balance_log","jacobian") ? "delta" : "binomial")")
-    println("Fixed α = $α_bo, κ = $κ_bo")
-    println("Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
-    println("Fidelity threshold: $(fidelity_threshold_Q === nothing ? "none (fixed $n_iter iterations)" : "Q* = $fidelity_threshold_Q (linear)")")
-    println("use_variable_mode = $use_variable_mode$(use_variable_mode ? ", n_floor=$n_floor, n_max=$n_max_shots" : "")")
-    println("Acquisition: $acq_label$a_bound_label$init_label")
-    println("Q_noisy benchmark N = $N_noisy_high")
+    println("Objective: $objective_mode, noise model: $noise_model")
+    println("N_shots = $N_shots, n_init = $n_initial_samples, n_iter = $n_iter, n_restarts = $n_restarts")
+    println("κ = $κ_bo, acq = ucb_random_scan$a_bound_label")
+    println("Fidelity threshold: $(fidelity_threshold === nothing ? "none" : "Q* = $fidelity_threshold (mu_one_check)")")
+    println("Number of simulations: $num_sims")
 
     start_time = time()
 
@@ -252,39 +104,16 @@ try
 
     _random_seeds      = random_seeds
     _n_iter            = n_iter
-    _use_variable_mode = use_variable_mode
-    _n_floor           = n_floor
-    _n_max_shots       = n_max_shots
     _n_restarts        = n_restarts
     _learn_noise_scale = !optimize_det
-    _k_acq             = k_acq
-    _min_sep           = min_sep
-    _use_zoom          = use_zoom
-    _M_zoom            = M_zoom
-    _zoom_radius       = zoom_radius
-    _use_lbfgs_acq     = use_lbfgs_acq
-    _use_grad_acq      = use_grad_acq
-    _acq_type          = acq_type
-    _ξ_ei              = ξ_ei
-    _mes_n_samples     = mes_n_samples
-    _feas_threshold    = feas_threshold
-    _stop_mode         = stop_mode
-    _init_method       = init_method
-    _log_trace         = log_trace
+    _fidelity_threshold = fidelity_threshold
 
     results_grid = pmap(1:num_sims; batch_size=1) do sim_idx
         try
             seed = _random_seeds[sim_idx]
-            Random.seed!(seed)   # seeds global RNG so Q-function draws (StatsBase) are reproducible
-            if _use_4d
-                _phase_drift[] = (rand() * 2.0 - 1.0) * span_phi
-                println("Starting simulation $sim_idx (phase_drift = $(round(_phase_drift[], digits=4)))...")
-            else
-                _phase_drift[] = 0.0
-                println("Starting simulation $sim_idx...")
-            end
+            Random.seed!(seed)
+            println("Starting simulation $sim_idx...")
             flush(stdout)
-            local drift_val = _phase_drift[]
 
             res = CalibrationCode.bayesopt_ucb_threshold(Q_fun;
                 bounds=bounds,
@@ -294,84 +123,36 @@ try
                 κ=κ_bo,
                 α=α_bo,
                 seed=seed,
-                maximize=_do_maximize,
-                fidelity_threshold=fidelity_threshold,
-                explore_frac=0.0,
+                maximize=true,
+                fidelity_threshold=_fidelity_threshold,
                 hyper_every=hyper_every,
                 learn_noise_scale=_learn_noise_scale,
                 n_restarts=_n_restarts,
-                use_variable_mode=_use_variable_mode,
-                n_floor=_n_floor,
-                n_max_shots=_n_max_shots,
-                k_acq=_k_acq,
-                min_sep=_min_sep,
-                use_zoom=_use_zoom,
-                M_zoom=_M_zoom,
-                zoom_radius=_zoom_radius,
-                use_lbfgs_acq=_use_lbfgs_acq,
-                use_grad_acq=_use_grad_acq,
-                acq_type=_acq_type,
-                ξ_ei=_ξ_ei,
-                mes_n_samples=_mes_n_samples,
-                feas_threshold=_feas_threshold,
-                stop_mode=_stop_mode,
-                init_method=_init_method,
-                collect_trace=_log_trace,
             )
 
-            _params   = u_to_params(res.x_rec)
-            fcl, fsb, A = _params[1], _params[2], _params[3]
-            phi_rec   = _use_4d ? _params[4] : 0.0
+            fcl, fsb, A = u_to_params(res.x_rec)
             Q_det_val = clamp(CalibrationCode.Q_det(t, fcl, fsb, A), 0.0, 1.0)
             n_iters   = res.n_iter_actual > 0 ? res.n_iter_actual : _n_iter
 
-            # High-N Q_noisy at recommended point (single-gate parity scan benchmark)
-            Q_noisy_hN_val = try
-                clamp(CalibrationCode.Q_noisy(t, fcl, fsb, A;
-                    phi_1=phi_rec, phi_2=0.0, N=_N_noisy_high), 0.0, 1.0)
-            catch
-                NaN
-            end
-
-            Q_noisy_val   = res.y_last   # last acquisition obs (linear Q scale)
-            Q_rec_val     = res.y_rec    # GP posterior mean at recommended point
-            total_shots_used = res.total_shots
-            n_train = length(res.σy)
-
-            if _use_4d
-                println("Simulation $sim_idx → Q_det=$(round(Q_det_val,digits=4))  Q_noisy_hN=$(round(Q_noisy_hN_val,digits=4))  phi_rec=$(round(phi_rec,digits=4))  drift=$(round(drift_val,digits=4))  iters=$n_iters  shots=$total_shots_used")
-            else
-                println("Simulation $sim_idx → Q_det=$(round(Q_det_val,digits=4))  Q_noisy_hN=$(round(Q_noisy_hN_val,digits=4))  iters=$n_iters  shots=$total_shots_used")
-            end
+            println("Simulation $sim_idx → Q_det=$(round(Q_det_val,digits=4))  iters=$n_iters  shots=$(res.total_shots)")
             flush(stdout)
 
             (
-                sim_idx=sim_idx,
-                seed=seed,
-                x_rec=res.x_rec,
-                Q_rec=Q_rec_val,
-                Q_det=Q_det_val,
-                Q_noisy_last=Q_noisy_val,
-                Q_noisy_hN=Q_noisy_hN_val,
-                n_iterations=n_iters,
-                total_shots=total_shots_used,
-                n_train=n_train,
-                phase_drift=drift_val,
-                phi_rec=phi_rec,
-                ℓ_final=res.ℓ_final,
-                σf_final=res.σf_final,
-                c_final=res.c_final,
-                x_acq_trace=res.x_acq_trace,
-                x_rec_trace=res.x_rec_trace,
-                m_rec_trace=res.m_rec_trace,
-                s_rec_trace=res.s_rec_trace,
-                y_acq_trace=res.y_acq_trace,
-                y_check_trace=res.y_check_trace,
+                sim_idx    = sim_idx,
+                seed       = seed,
+                x_rec      = res.x_rec,
+                Q_rec      = res.y_rec,
+                Q_det      = Q_det_val,
+                Q_last     = res.y_last,
+                n_iterations = n_iters,
+                total_shots  = res.total_shots,
+                n_train    = length(res.σy),
+                ℓ_final    = res.ℓ_final,
+                σf_final   = res.σf_final,
+                c_final    = res.c_final,
             )
         catch e
-            println("ERROR in simulation $sim_idx : ")
-            println("Error type: $(typeof(e))")
-            println("Error message: $e")
+            println("ERROR in simulation $sim_idx: $(typeof(e)): $e")
             Base.showerror(stdout, e, catch_backtrace())
             println()
             flush(stdout)
@@ -379,65 +160,27 @@ try
         end
     end
 
-    # Per-seed trace CSVs (written only when BO_LOG_TRACE=true)
-    if log_trace
-        trace_dir = joinpath(output_dir, "traces")
-        mkpath(trace_dir)
-        d_tr = length(bounds)
-        acq_label_tr = get(ENV, "BO_ACQ_TYPE", "ucb")
-        for r in results_grid
-            n_tr = length(r.m_rec_trace)
-            if n_tr == 0; continue; end
-            fname = joinpath(trace_dir, "trace_seed$(r.seed)_$(acq_label_tr).csv")
-            open(fname, "w") do io
-                hdr_acq = join(["x_acq_u$i" for i in 1:d_tr], ",")
-                hdr_rec = join(["x_rec_u$i" for i in 1:d_tr], ",")
-                println(io, "iter,$hdr_acq,$hdr_rec,m_rec,s_rec,y_acq,y_check")
-                for it in 1:n_tr
-                    acq_str = join([@sprintf("%.6f", r.x_acq_trace[j, it]) for j in 1:d_tr], ",")
-                    rec_str = join([@sprintf("%.6f", r.x_rec_trace[j, it]) for j in 1:d_tr], ",")
-                    @printf(io, "%d,%s,%s,%.6f,%.6f,%.6f,%.6f\n",
-                            it, acq_str, rec_str,
-                            r.m_rec_trace[it], r.s_rec_trace[it],
-                            r.y_acq_trace[it], r.y_check_trace[it])
-                end
-            end
-        end
-        println("Trace CSVs written to: $trace_dir")
-    end
+    Q_det_values = [r.Q_det for r in results_grid]
+    best_idx     = argmax(Q_det_values)
+    best_result  = results_grid[best_idx]
 
-    Q_det_values    = [r.Q_det     for r in results_grid]
-    Q_noisy_values  = [r.Q_noisy_hN for r in results_grid]
-
-    best_idx    = argmax(Q_det_values)
-    best_result = results_grid[best_idx]
-
-    avg_Q_det = mean(Q_det_values);   med_Q_det = median(Q_det_values)
+    avg_Q_det = mean(Q_det_values); med_Q_det = median(Q_det_values)
     min_Q_det = minimum(Q_det_values); max_Q_det = maximum(Q_det_values)
     std_Q_det = std(Q_det_values)
 
-    valid_qn = filter(isfinite, Q_noisy_values)
-    avg_Q_noisy = isempty(valid_qn) ? NaN : mean(valid_qn)
-    med_Q_noisy = isempty(valid_qn) ? NaN : median(valid_qn)
-    std_Q_noisy = isempty(valid_qn) ? NaN : std(valid_qn)
-
-    iter_values     = [r.n_iterations for r in results_grid]
-    avg_iterations  = mean(iter_values); med_iterations = median(iter_values)
-    std_iterations  = std(iter_values)
-
-    total_train = sum(r.n_train for r in results_grid)
+    iter_values    = [r.n_iterations for r in results_grid]
+    avg_iterations = mean(iter_values); med_iterations = median(iter_values)
+    std_iterations = std(iter_values)
+    total_train    = sum(r.n_train for r in results_grid)
 
     println("\n=== RESULTS SUMMARY ===")
-    println("Optimization mode: $optimization_mode, acq: $acq_label")
     println("Best Q_det = $(best_result.Q_det)  (Simulation $(best_result.sim_idx))")
     println("Average Q_det = $avg_Q_det ± $std_Q_det")
     println("Median Q_det = $med_Q_det")
     println("Min/Max Q_det = $min_Q_det / $max_Q_det")
-    println("Average Q_noisy (N=$N_noisy_high) = $avg_Q_noisy ± $std_Q_noisy")
-    println("Median  Q_noisy (N=$N_noisy_high) = $med_Q_noisy")
     println("Average iterations = $avg_iterations ± $std_iterations")
     println("Median iterations  = $med_iterations")
-    println("Total training points across all sims = $total_train")
+    println("Total training points = $total_train")
 
     elapsed_seconds = time() - start_time
     elapsed_total   = round(Int, elapsed_seconds)
@@ -445,67 +188,40 @@ try
                          lpad(string((elapsed_total % 3600) ÷ 60), 2, '0'), ":",
                          lpad(string(elapsed_total % 60), 2, '0'))
 
-    _output_dir = get(ENV, "BO_OUTPUT_DIR", joinpath(@__DIR__, "..", "data"))
+    _output_dir = get(ENV, "BO_OUTPUT_DIR", joinpath(@__DIR__, "data"))
     output_file = joinpath(_output_dir, output_file_name)
     open(output_file, "w") do io
         println(io, "=== BENCHMARK RESULTS ===")
-        println(io, "Optimization mode: $optimization_mode, objective: $objective_mode, 4D: $use_4d, maximize: $_do_maximize")
-        println(io, "N_shots = $N_shots, noise model = binomial")
-        println(io, "Fixed α = $α_bo, κ = $κ_bo")
-        println(io, "Number of simulations: $num_sims, n_iter = $n_iter, n_restarts = $n_restarts")
-        println(io, "Fidelity threshold: $(fidelity_threshold_Q === nothing ? "none" : "Q* = $fidelity_threshold_Q")  stop_mode=$stop_mode$(objective_mode == "jacobian" && debias_jac ? "  debias_jac=true" : "")")
-        println(io, "use_variable_mode = $use_variable_mode$(use_variable_mode ? ", n_floor=$n_floor, n_max=$n_max_shots" : "")")
-        println(io, "Acquisition: $acq_label$a_bound_label$init_label  (acq_type=$acq_type, k_acq=$k_acq, min_sep=$min_sep, use_zoom=$use_zoom, M_zoom=$M_zoom, zoom_radius=$zoom_radius, use_lbfgs_acq=$use_lbfgs_acq, use_grad_acq=$use_grad_acq, a_bound=$a_bound)")
-        println(io, "Q_noisy benchmark N = $N_noisy_high")
+        println(io, "Objective: $objective_mode, noise model: $noise_model, maximize: true")
+        println(io, "N_shots = $N_shots, n_init = $n_initial_samples, n_iter = $n_iter, n_restarts = $n_restarts")
+        println(io, "κ = $κ_bo, acq = ucb_random_scan$a_bound_label")
+        println(io, "Fidelity threshold: $(fidelity_threshold === nothing ? "none" : "Q* = $fidelity_threshold (mu_one_check)")")
         println(io, "Elapsed time: $elapsed_hms")
         println(io, "")
         println(io, "=== RESULTS SUMMARY ===")
-        println(io, "Best Q_det = $(best_result.Q_det) (Simulation $(best_result.sim_idx), Seed $(best_result.seed), Iterations $(best_result.n_iterations))")
+        println(io, "Best Q_det = $(best_result.Q_det) (Sim $(best_result.sim_idx), Seed $(best_result.seed), Iters $(best_result.n_iterations))")
         println(io, "Average Q_det = $avg_Q_det ± $std_Q_det")
         println(io, "Median Q_det = $med_Q_det")
         println(io, "Min Q_det = $min_Q_det")
         println(io, "Max Q_det = $max_Q_det")
-        println(io, "Average Q_noisy_hN (N=$N_noisy_high) = $avg_Q_noisy ± $std_Q_noisy")
-        println(io, "Median  Q_noisy_hN (N=$N_noisy_high) = $med_Q_noisy")
         println(io, "Average iterations = $avg_iterations ± $std_iterations")
         println(io, "Median iterations  = $med_iterations")
-        println(io, "Total training points across all sims = $total_train")
+        println(io, "Total training points = $total_train")
         println(io, "")
         println(io, "=== BEST RESULT PHYSICAL PARAMETERS ===")
-        _best_params = u_to_params(best_result.x_rec)
-        fcl_rec, fsb_rec, A_rec = _best_params[1], _best_params[2], _best_params[3]
+        fcl_rec, fsb_rec, A_rec = u_to_params(best_result.x_rec)
         @printf(io, "Recommended f_cl = %.15e\n", fcl_rec)
         @printf(io, "Recommended f_sb = %.15e\n", fsb_rec)
         @printf(io, "Recommended A    = %.15e\n", A_rec)
-        use_4d && println(io, "Recommended phi  = $(_best_params[4])")
         @printf(io, "Baseline   f_cl = %.15e  f_sb = %.15e  A = %.15e\n", f_cl0, f_sb0, A0)
-        println(io, "Best final GP hyperparameters:")
-        println(io, "  ℓ  = $(round.(best_result.ℓ_final, digits=4))")
-        println(io, "  σf = $(round(best_result.σf_final, digits=4))")
-        println(io, "  c  = $(round(best_result.c_final,  digits=4))")
         println(io, "Best u_rec = $(best_result.x_rec)")
+        println(io, "Best GP hyperparameters: ℓ=$(round.(best_result.ℓ_final,digits=4))  σf=$(round(best_result.σf_final,digits=4))  c=$(round(best_result.c_final,digits=4))")
         println(io, "")
         println(io, "=== All Results ===")
-        n_dims        = length(bounds)
-        ℓ_headers     = join(["ℓ$i" for i in 1:n_dims], "\t")
-        u_headers     = join(["u_$i" for i in 1:n_dims], "\t")
-        phase_headers = use_4d ? "\tdrift\tphi_rec\tdelta_phi" : ""
-        println(io, "Sim\tSeed\tIterations\tTotalShots\tNTrain\tQ_det\tQ_noisy_last\tQ_noisy_hN\tQ_rec\t$u_headers\t$ℓ_headers\tσf\tc$phase_headers")
+        println(io, "Sim\tSeed\tIterations\tTotalShots\tNTrain\tQ_det\tQ_last\tQ_rec\tℓ1\tℓ2\tℓ3\tσf\tc")
         for r in results_grid
-            ℓ_str     = join([@sprintf("%.4f", v) for v in r.ℓ_final], "\t")
-            u_str     = join([@sprintf("%.4f", v) for v in r.x_rec],    "\t")
-            phase_str = use_4d ? "\t$(@sprintf("%.4f", r.phase_drift))\t$(@sprintf("%.4f", r.phi_rec))\t$(@sprintf("%.4f", r.phi_rec - r.phase_drift))" : ""
-            println(io, "$(r.sim_idx)\t$(r.seed)\t$(r.n_iterations)\t$(r.total_shots)\t$(r.n_train)\t$(@sprintf("%.4f", r.Q_det))\t$(@sprintf("%.4f", r.Q_noisy_last))\t$(@sprintf("%.4f", r.Q_noisy_hN))\t$(@sprintf("%.4f", r.Q_rec))\t$u_str\t$ℓ_str\t$(@sprintf("%.4f", r.σf_final))\t$(@sprintf("%.4f", r.c_final))$phase_str")
-        end
-        println(io, "")
-        println(io, "=== Median u values (median ± std across seeds) ===")
-        u_matrix = hcat([r.x_rec for r in results_grid]...)   # n_dims × num_sims
-        for i in 1:n_dims
-            u_vals = u_matrix[i, :]
-            med_u  = median(u_vals)
-            std_u  = std(u_vals)
-            @printf(io, "u_%d : median = %+.6f  ±  %.6f  (min = %+.6f, max = %+.6f)\n",
-                    i, med_u, std_u, minimum(u_vals), maximum(u_vals))
+            ℓ_str = join(round.(r.ℓ_final, digits=4), "\t")
+            println(io, "$(r.sim_idx)\t$(r.seed)\t$(r.n_iterations)\t$(r.total_shots)\t$(r.n_train)\t$(r.Q_det)\t$(r.Q_last)\t$(r.Q_rec)\t$ℓ_str\t$(round(r.σf_final,digits=4))\t$(round(r.c_final,digits=4))")
         end
     end
 
