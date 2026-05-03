@@ -77,13 +77,12 @@ try
     α_bo = 1.5
     κ_bo = 1.9
 
-    noise_model    = objective_mode == "3ms_balance" ? "delta" : "binomial"
-    a_bound_label  = a_bound < 1.0 ? ", u_A ∈ [$(-a_bound), $a_bound]" : ""
+    noise_model    = "binomial"
 
     println("=== Starting Parallel Simulations (Random Seeds) ===")
     println("Objective: $objective_mode, noise model: $noise_model")
     println("N_shots = $N_shots, n_init = $n_initial_samples, n_iter = $n_iter, n_restarts = $n_restarts")
-    println("κ = $κ_bo, acq = ucb_random_scan$a_bound_label")
+    println("κ = $κ_bo, acq = ucb_random_scan")
     println("Fidelity threshold: $(fidelity_threshold === nothing ? "none" : "Q* = $fidelity_threshold (mu_one_check)")")
     println("Number of simulations: $num_sims")
 
