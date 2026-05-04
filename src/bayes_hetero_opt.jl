@@ -6,10 +6,7 @@ using Statistics
 using LinearAlgebra
 using Optim
 
-# -------------------------
 # Kernel and covariance
-# -------------------------
-
 @inline function matern32(x::AbstractVector, z::AbstractVector,
                           ℓ::AbstractVector, σf::Float64)
     r2 = 0.0
@@ -196,23 +193,22 @@ function predict_latent(gp::HeteroGP, x::Vector{Float64})
     return gp.yμ + gp.yσ * μstd, (gp.yσ^2) * s2std
 end
 
-# -------------------------
 # BO structures + utilities
-# -------------------------
-
 struct HeteroBOResult
-    X::Matrix{Float64}
-    y::Vector{Float64}
-    σy::Vector{Float64}
+    X::Matrix{Float64}          # d × n_total  — all evaluated points
+    y::Vector{Float64}          # n_total       — measured values (original space)
+    σy::Vector{Float64}         # n_total       — noise estimates
+    i_acq::Vector{Int}          # indices of init + UCB acquisition queries
+    i_opt::Vector{Int}          # indices of GPR recommendation evaluations
     bounds::Vector{Tuple{Float64,Float64}}
     n_shots::Int
     n_init::Int
     n_iter::Int
     maximize::Bool
-    x_rec::Vector{Float64}
-    y_rec::Float64
+    x_last::Vector{Float64}     # final GP-recommended point
+    y_last::Float64             # measured f(x_last)
+    y_hat_last::Float64         # GP posterior mean at x_last (original space)
     n_iter_actual::Int
-    y_last::Float64
     ℓ_final::Vector{Float64}
     σf_final::Float64
     c_final::Float64
@@ -241,8 +237,8 @@ end
 
 @inline function _call_f_raw(f, x::Vector{Float64}, n::Int)
     result = f(x, n)
-    result isa Tuple || throw(ArgumentError("f must return a (y, σy) tuple"))
-    return Float64(result[1]), Float64(result[2])
+    # PythonCall returns Py objects from Python callbacks — use pyconvert + 0-based indexing
+    return pyconvert(Float64, result[0]), pyconvert(Float64, result[1])
 end
 
 @inline function _rand_in_box(rng::Random.AbstractRNG, lb::Vector{Float64}, ub::Vector{Float64})
@@ -282,10 +278,7 @@ function recommend_mean(gp::HeteroGP, bounds;
     return best_x, best_m, sqrt(max(best_s2, 0.0))
 end
 
-# -------------------------
 # Main algorithm
-# -------------------------
-
 """
     bayesopt_ucb_threshold(f; bounds, n_shots, ...)
 
@@ -303,7 +296,6 @@ function bayesopt_ucb_threshold(f;
                                M_acq::Int=20000,
                                M_rec::Int=20000,
                                κ::Float64=2.0,
-                               α::Float64=0.5,
                                maximize::Bool=true,
                                hyper_every::Int=10,
                                rng::Random.AbstractRNG=Random.default_rng(),
@@ -325,13 +317,17 @@ function bayesopt_ucb_threshold(f;
     ub = Float64[b[2] for b in bounds]
     d  = length(bounds)
 
-    n_cap = n_init + 2 * n_iter
+    # n_init + one UCB + one opt-check per iteration + 1 final recommendation
+    n_cap = n_init + 2 * n_iter + 1
     X  = Matrix{Float64}(undef, d, n_cap)
-    y  = Vector{Float64}(undef, n_cap)
+    y  = Vector{Float64}(undef, n_cap)   # stored sign-flipped internally; un-flipped on return
     σy = Vector{Float64}(undef, n_cap)
     write_idx         = 0
     total_shots_count = 0
+    i_acq_list = Int[]
+    i_opt_list  = Int[]
 
+    # init: random exploration
     for _ in 1:n_init
         x = _rand_in_box(rng_local, lb, ub)
         y_raw, σy_i = _call_f_raw(f, x, n_shots)
@@ -340,11 +336,11 @@ function bayesopt_ucb_threshold(f;
         X[:, write_idx] = x
         y[write_idx]    = maximize ? y_raw : -y_raw
         σy[write_idx]   = σy_i
+        push!(i_acq_list, write_idx)
     end
 
-    θ_prev       = nothing
+    θ_prev        = nothing
     n_iter_actual = n_iter
-    y_last_val   = 0.0
 
     for it in 1:n_iter
         do_opt = (it == 1) || (hyper_every > 0 && it % hyper_every == 0)
@@ -357,7 +353,7 @@ function bayesopt_ucb_threshold(f;
                           rng=rng_local)
         θ_prev = gp.θ
 
-        # Acquisition: random scan over M_acq candidates, pick best UCB
+        # UCB acquisition
         best_x = _rand_in_box(rng_local, lb, ub)
         best_μ, best_s2 = predict_latent(gp, best_x)
         best_a = ucb_score(best_μ, best_s2, κ)
@@ -378,26 +374,39 @@ function bayesopt_ucb_threshold(f;
             X[:, write_idx] = best_x
             y[write_idx]    = maximize ? y_raw : -y_raw
             σy[write_idx]   = σy_i
+            push!(i_acq_list, write_idx)
         end
-        y_last_val = maximize ? y_raw : -y_raw
-
         verbose && @info "it=$it best_acq=$best_a"
 
-        # mu_one_check: stop if GP posterior mean at recommended point ≥ threshold
+        # mu_one_check: GPR mean ≥ threshold → confirm with a real sample
         if fidelity_threshold !== nothing
-            x_rec_cur, m_rec, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
-            if m_rec >= fidelity_threshold
-                n_iter_actual = it
-                y_out = maximize ? y[1:write_idx] : -y[1:write_idx]
-                return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
-                                      bounds, n_shots, n_init, n_iter, maximize,
-                                      x_rec_cur, m_rec, n_iter_actual,
-                                      maximize ? y_last_val : -y_last_val,
-                                      gp.ℓ, gp.σf, gp.c, total_shots_count)
+            x_opt, m_opt, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+            if m_opt >= fidelity_threshold
+                y_opt, σy_opt = _call_f_raw(f, x_opt, n_shots)
+                total_shots_count += n_shots
+                if _is_far_enough(x_opt, X, write_idx)
+                    write_idx += 1
+                    X[:, write_idx] = x_opt
+                    y[write_idx]    = maximize ? y_opt : -y_opt
+                    σy[write_idx]   = σy_opt
+                    push!(i_opt_list, write_idx)
+                end
+                y_hat_last = maximize ? m_opt : -m_opt
+                y_last     = y_opt
+                if y_last >= fidelity_threshold
+                    n_iter_actual = it
+                    y_out = maximize ? y[1:write_idx] : -y[1:write_idx]
+                    return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
+                                          i_acq_list, i_opt_list,
+                                          bounds, n_shots, n_init, n_iter, maximize,
+                                          x_opt, y_last, y_hat_last, n_iter_actual,
+                                          gp.ℓ, gp.σf, gp.c, total_shots_count)
+                end
             end
         end
     end
 
+    # final GPR recommendation
     gp = fit_heterogp(X[:, 1:write_idx], y[1:write_idx], σy[1:write_idx];
                       θ_init=θ_prev,
                       learn_hypers=true,
@@ -406,14 +415,23 @@ function bayesopt_ucb_threshold(f;
                       jitter=1e-8,
                       rng=rng_local)
 
-    x_rec, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
-    y_rec_raw, _ = _call_f_raw(f, x_rec, n_shots)
+    x_last, m_last, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+    y_last, σy_last   = _call_f_raw(f, x_last, n_shots)
     total_shots_count += n_shots
+    if _is_far_enough(x_last, X, write_idx)
+        write_idx += 1
+        X[:, write_idx] = x_last
+        y[write_idx]    = maximize ? y_last : -y_last
+        σy[write_idx]   = σy_last
+        push!(i_opt_list, write_idx)
+    end
 
+    y_hat_last = maximize ? m_last : -m_last
     y_out      = maximize ? y[1:write_idx] : -y[1:write_idx]
-    y_last_out = maximize ? y_last_val : -y_last_val
 
-    return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx], bounds, n_shots,
-                          n_init, n_iter, maximize, x_rec, y_rec_raw, n_iter_actual,
-                          y_last_out, gp.ℓ, gp.σf, gp.c, total_shots_count)
+    return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
+                          i_acq_list, i_opt_list,
+                          bounds, n_shots, n_init, n_iter, maximize,
+                          x_last, y_last, y_hat_last, n_iter_actual,
+                          gp.ℓ, gp.σf, gp.c, total_shots_count)
 end
