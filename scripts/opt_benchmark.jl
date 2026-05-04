@@ -381,7 +381,7 @@ try
 
     # Per-seed trace CSVs (written only when BO_LOG_TRACE=true)
     if log_trace
-        trace_dir = joinpath(output_dir, "traces")
+        trace_dir = joinpath(get(ENV, "BO_OUTPUT_DIR", joinpath(@__DIR__, "..", "data")), "traces")
         mkpath(trace_dir)
         d_tr = length(bounds)
         acq_label_tr = get(ENV, "BO_ACQ_TYPE", "ucb")

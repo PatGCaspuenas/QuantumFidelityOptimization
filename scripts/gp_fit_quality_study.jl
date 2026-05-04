@@ -59,13 +59,13 @@ end
 
 # ── Study parameters (overridable via ENV) ────────────────────────────────────
 # N_pts_list: training set sizes to sweep
-const N_PTS_LIST   = [10, 25, 50, 100, 250, 500, 1000, 5000]
+const N_PTS_LIST   = [10, 25, 50, 100, 250, 500, 1000]
 # N_shots_list: shots per training point (fixed-N mode)
 const N_SHOTS_LIST = [50, 100, 250, 500, 1000, 2500]
 # Number of random seeds (different training point locations)
 const N_SEEDS      = parse(Int, get(ENV, "GP_STUDY_N_SEEDS", "50"))
 # Ground-truth N: high-N Q_varMS used as "true" landscape
-const N_HIGH       = parse(Int, get(ENV, "GP_STUDY_N_HIGH",  "20000"))
+const N_HIGH       = parse(Int, get(ENV, "GP_STUDY_N_HIGH",  "100000"))
 # Test grid size (fixed Sobol points evaluated at N_HIGH)
 const N_TEST       = parse(Int, get(ENV, "GP_STUDY_N_TEST",  "5000"))
 # Phase-1 shots for the adaptive scheme
@@ -96,6 +96,24 @@ flush(stdout)
 @everywhere const _Q_true_w    = $Q_true_arr
 @everywhere const _N_TEST_w    = $N_TEST
 @everywhere const _N_HIGH_w    = $N_HIGH
+
+# ── 1D Slice Setup ────────────────────────────────────────────────────────────
+const N_SLICE = 100
+const u_grid = range(-1.0, 1.0, length=N_SLICE)
+
+# Slice 1: vary f_cl (u[1]), fix others to 0
+slice_fcl_pts = [[u, 0.0, 0.0] for u in u_grid]
+# Slice 2: vary f_sb (u[2]), fix others to 0
+slice_fsb_pts = [[0.0, u, 0.0] for u in u_grid]
+
+println("Computing high-N ground truth for 1D slices...")
+# Ground truth for slices
+Q_true_slice_fcl = [Q_fun(pt, N_HIGH)[1] for pt in slice_fcl_pts]
+Q_true_slice_fsb = [Q_fun(pt, N_HIGH)[1] for pt in slice_fsb_pts]
+
+@everywhere const _slice_fcl_mat = $(hcat(slice_fcl_pts...))
+@everywhere const _slice_fsb_mat = $(hcat(slice_fsb_pts...))
+@everywhere const _N_SLICE       = $N_SLICE
 
 # ── Per-point GP prediction (returns μ, σ for all test points) ────────────────
 @everywhere function predict_test(gp)
@@ -196,11 +214,32 @@ end
 
     μs, σs = predict_test(gp)
     m = compute_metrics(μs[valid], σs[valid], _Q_true_w[valid])
-    return (; m..., n_valid=n_valid, l1=gp.ℓ[1], l2=gp.ℓ[2], l3=gp.ℓ[3], sf=gp.σf, c=gp.c)
+    return (; m..., n_valid=n_valid, l1=gp.ℓ[1], l2=gp.ℓ[2], l3=gp.ℓ[3], sf=gp.σf, c=gp.c, gp=gp)
+end
+
+@everywhere function save_slices(gp, mode::String, n_pts::Int, N_shots::Int)
+    # Predict f_cl slice
+    μ_fcl = Vector{Float64}(undef, _N_SLICE)
+    σ_fcl = Vector{Float64}(undef, _N_SLICE)
+    for i in 1:_N_SLICE
+        μ_fcl[i], s2 = CalibrationCode.predict_latent(gp, _slice_fcl_mat[:, i])
+        σ_fcl[i] = sqrt(max(s2, 0.0))
+    end
+    
+    # Predict f_sb slice
+    μ_fsb = Vector{Float64}(undef, _N_SLICE)
+    σ_fsb = Vector{Float64}(undef, _N_SLICE)
+    for i in 1:_N_SLICE
+        μ_fsb[i], s2 = CalibrationCode.predict_latent(gp, _slice_fsb_mat[:, i])
+        σ_fsb[i] = sqrt(max(s2, 0.0))
+    end
+    
+    return (μ_fcl=μ_fcl, σ_fcl=σ_fcl, μ_fsb=μ_fsb, σ_fsb=σ_fsb)
 end
 
 # ── Single config: one (n_pts, N_shots, seed) triple ─────────────────────────
 @everywhere function run_config(n_pts::Int, N_shots::Int, seed::Int)
+    println("Worker $(myid()) starting n_pts=$n_pts, N_shots=$N_shots, seed=$seed")
     rng = MersenneTwister(seed)
 
     # Random training locations
@@ -258,7 +297,20 @@ end
         fit_and_metrics(X_mat, y_adp, σ_adp, MersenneTwister(seed + 200_000))
     end
 
-    return (fixed=met_fix, adaptive=met_adp,
+    slices_fix = nothing
+    slices_adp = nothing
+    
+    if seed == 1
+        if met_fix !== nothing
+            slices_fix = save_slices(met_fix.gp, "fixed", n_pts, N_shots)
+        end
+        if met_adp !== nothing
+            slices_adp = save_slices(met_adp.gp, "adaptive", n_pts, N_shots)
+        end
+    end
+
+    return (fixed=met_fix, adaptive=met_adp, 
+            slices_fix=slices_fix, slices_adp=slices_adp,
             n_pts=n_pts, N_shots=N_shots, seed=seed)
 end
 
@@ -316,6 +368,41 @@ n_ok_adp = count(r -> r.adaptive !== nothing, results)
 println("Saved $(outfile)")
 println("  fixed rows    : $(n_ok_fix) / $(length(results))")
 println("  adaptive rows : $(n_ok_adp) / $(length(results))")
+
+# ── Save 1D Slices CSV (Tidy Format) ──────────────────────────────────────────
+slice_outfile = joinpath(outdir, "slices_output.csv")
+slice_header  = "mode,N_shots,n_pts,slice_axis,u,mu,sigma"
+
+open(slice_outfile, "w") do io
+    println(io, slice_header)
+    
+    for r in results
+        # We only saved slices for seed == 1 to avoid massive files
+        r.seed == 1 || continue 
+        
+        # Helper function to dump the arrays
+        function write_slice(mode_str, slices)
+            slices === nothing && return
+            
+            for (i, u) in enumerate(u_grid)
+                # Write fcl slice row
+                @printf(io, "%s,%d,%d,fcl,%.6f,%.6f,%.6f\n",
+                        mode_str, r.N_shots, r.n_pts, u, 
+                        slices.μ_fcl[i], slices.σ_fcl[i])
+                
+                # Write fsb slice row
+                @printf(io, "%s,%d,%d,fsb,%.6f,%.6f,%.6f\n",
+                        mode_str, r.N_shots, r.n_pts, u, 
+                        slices.μ_fsb[i], slices.σ_fsb[i])
+            end
+        end
+        
+        write_slice("fixed", r.slices_fix)
+        write_slice("adaptive", r.slices_adp)
+    end
+end
+
+println("Saved $(slice_outfile)")
 
 # ── Quick summary table ───────────────────────────────────────────────────────
 for (label, field) in [("RMSE (raw)",  :rmse),
