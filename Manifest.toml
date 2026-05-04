@@ -1155,7 +1155,7 @@ weakdeps = ["Dates", "Test"]
 
 [[deps.IonSim]]
 deps = ["FunctionWrappers", "LinearAlgebra", "NLsolve", "Optim", "OrderedCollections", "Plots", "PolynomialRoots", "QuantumOptics", "SparseArrays", "Statistics", "WignerSymbols", "YAML"]
-path = "/home/patcaspu/.julia/dev/IonSim"
+path = "/Users/patcaspu/.julia/dev/IonSim"
 uuid = "511e77fe-ab93-41f7-8f07-8f89809c6435"
 version = "0.5.1"
 

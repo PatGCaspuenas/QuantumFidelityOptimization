@@ -16,7 +16,7 @@ echo ""
 echo "[1/3] Checking juliaup..."
 if ! command -v juliaup &>/dev/null; then
     echo "  juliaup not found — installing..."
-    curl -fsSL https://install.julialang.org | sh -s -- --yes
+    curl -fsSL https://install.julialang.org | sh -s -- --yes </dev/null
     # Add to PATH for this session (installer sets up shell profile, but not the current script)
     export PATH="$HOME/.juliaup/bin:$PATH"
     echo "  juliaup installed."
