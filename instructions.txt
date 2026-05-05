@@ -1,3 +1,14 @@
-1. Create a Python 3 venv and install:
-      pip install jaqalpaq qscout numpy matplotlib scipy ipykernel juliacall
-2. Run setup.sh  (installs Julia 1.11.6 + project packages via juliaup)
+1. Create a Python 3 venv
+      python3 -m venv .venv
+2. Install:
+      pip install numpy matplotlib scipy juliacall
+      pip install ipykernel
+      ipython kernel install --name=preferred-name --user
+      pip install git+https://gitlab.com/quapack/pyrpe.git
+      pip install JaqalPaq'[pygsti-integration,notebooks]' QSCOUT-gatemodels \
+    JaqalPaq-extras'[qiskit,pyquil,cirq,pytket,tutorial]'
+   Note: projectq is excluded — it fails to compile on Apple Silicon (x86-only intrinsics).
+3. Run setup.sh  (installs Julia 1.11.6 + project packages via juliaup)
+   Note: setup.sh also patches juliacall's juliapkg.json to remove an OpenSSL_jll
+         version pin (=2.0.0) that conflicts with Julia 1.11's bundled version (0.0.0).
+         If you reinstall juliacall, re-run setup.sh to reapply the patch.

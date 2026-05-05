@@ -5,18 +5,47 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JULIA_VERSION="1.11.6"
+VENV_DIR="$REPO_DIR/.venv"
 
 echo "========================================"
 echo "  QuantumFidelityOptimization Setup"
 echo "  Julia $JULIA_VERSION"
 echo "========================================"
 
+# ── 0. Patch juliacall for Julia 1.11 compatibility ─────────────────────────
+# juliapkg <=0.1.23 adds OpenSSL_jll = "=2.0.0" to the Julia env, which has no
+# match in Julia 1.11 (bundled at 0.0.0). Remove the entry so Julia uses its own.
+echo ""
+echo "[0/3] Patching juliacall juliapkg.json for Julia 1.11..."
+JULIACALL_JSON="$(find "$VENV_DIR" -path "*/juliacall/juliapkg.json" 2>/dev/null | head -1)"
+if [ -n "$JULIACALL_JSON" ]; then
+    python3 - "$JULIACALL_JSON" <<'EOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+pkgs = data.get("packages", {})
+if "OpenSSL_jll" in pkgs:
+    del pkgs["OpenSSL_jll"]
+    with open(path, "w") as f:
+        json.dump(data, f, indent=4)
+    print(f"  Removed OpenSSL_jll from {path}")
+else:
+    print(f"  OpenSSL_jll not present in {path}, nothing to do.")
+EOF
+else
+    echo "  juliacall not found in $VENV_DIR — skipping patch."
+fi
+
 # ── 1. Install juliaup if not present ────────────────────────────────────────
 echo ""
 echo "[1/3] Checking juliaup..."
 if ! command -v juliaup &>/dev/null; then
     echo "  juliaup not found — installing..."
-    curl -fsSL https://install.julialang.org | sh -s -- --yes </dev/null
+    _juliaup_installer="$(mktemp /tmp/juliaup_install.XXXXXX.sh)"
+    curl -fsSL https://install.julialang.org -o "$_juliaup_installer"
+    sh "$_juliaup_installer" --yes
+    rm -f "$_juliaup_installer"
     # Add to PATH for this session (installer sets up shell profile, but not the current script)
     export PATH="$HOME/.juliaup/bin:$PATH"
     echo "  juliaup installed."

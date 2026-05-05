@@ -2,6 +2,7 @@ figures/
 *.bak
 *.png
 *.gif
+.venv
 others/
 docs/
 .claude/
