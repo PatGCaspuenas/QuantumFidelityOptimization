@@ -1,0 +1,7 @@
+metric=q_varMS
+n_grid=71
+u1_fix=0.0
+u2_fix=-0.0
+u3_fix=0.0
+n_noisy=100000
+q_at_fix=1.0

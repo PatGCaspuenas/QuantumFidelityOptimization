@@ -177,6 +177,15 @@ end
     return σ * sqrt(2.0 / π) * exp(-0.5 * z^2) - d * (1.0 - erf(z / sqrt(2.0)))
 end
 
+# Variance of |d + ε| where ε ~ N(0, σ²), d ≥ 0.
+# Var[|X|] = E[X²] - E[|X|]² = σ² + d² - E[|X|]²
+# Used as the consistent noise model after debiasing: replaces binomial sigma_delta.
+@inline function _folded_var(d::Float64, σ::Float64)::Float64
+    σ < 1e-15 && return 0.0
+    E_abs = d + _folded_bias(d, σ)
+    return max(σ^2 + d^2 - E_abs^2, 0.0)
+end
+
 function Q_ms_sequence_det(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
                            subgates::AbstractVector{<:MSSubgate};
                            relative_phase::Float64=0.0,
@@ -239,10 +248,11 @@ function Q_ms_sequence_σ(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
         d_gg = abs(expected_gg - P_SS)
         d_ee = abs(expected_ee - P_DD)
         Q = clamp(1.0 - d_gg - d_ee, 0.0, 1.0)
+        σ_gg = sqrt(max(P_SS * (1.0 - P_SS), 0.0) / N)
+        σ_ee = sqrt(max(P_DD * (1.0 - P_DD), 0.0) / N)
         if debias
-            σ_gg = sqrt(max(P_SS * (1.0 - P_SS), 0.0) / N)
-            σ_ee = sqrt(max(P_DD * (1.0 - P_DD), 0.0) / N)
             Q = clamp(Q + _folded_bias(d_gg, σ_gg) + _folded_bias(d_ee, σ_ee), 0.0, 1.0)
+            return Q, sqrt(max(_folded_var(d_gg, σ_gg) + _folded_var(d_ee, σ_ee), 0.0))
         end
         return Q, sigma_delta(P_SS, P_DD, expected_gg, expected_ee, N)
     end
