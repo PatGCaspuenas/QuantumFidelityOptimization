@@ -200,18 +200,12 @@ struct HeteroBOResult
     σy::Vector{Float64}         # n_total       — noise estimates
     i_acq::Vector{Int}          # indices of init + UCB acquisition queries
     i_opt::Vector{Int}          # indices of GPR recommendation evaluations
-    bounds::Vector{Tuple{Float64,Float64}}
-    n_shots::Int
-    n_init::Int
-    n_iter::Int
-    maximize::Bool
-    x_last::Vector{Float64}     # final GP-recommended point
-    y_last::Float64             # measured f(x_last)
-    y_hat_last::Float64         # GP posterior mean at x_last (original space)
+    X_opt::Matrix{Float64}      # d × n_iter_actual  — GP-recommended points at each iteration
+    mu_opt::Vector{Float64}     # n_iter_actual       — GP posterior mean at the recommended points (original space)
+    y_last_opt::Float64         # final recommended point's measured value (original space)
+    σy_opt::Float64                # final recommended point's noise estimate
     n_iter_actual::Int
-    ℓ_final::Vector{Float64}
-    σf_final::Float64
-    c_final::Float64
+    θ_i::Matrix{Float64}         # (d+2) × n_iter_actual  — GP hyperparameters at each iteration
     total_shots::Int
 end
 
@@ -322,6 +316,12 @@ function bayesopt_ucb_threshold(f;
     X  = Matrix{Float64}(undef, d, n_cap)
     y  = Vector{Float64}(undef, n_cap)   # stored sign-flipped internally; un-flipped on return
     σy = Vector{Float64}(undef, n_cap)
+
+    X_opt = Matrix{Float64}(undef, d, n_cap)
+    mu_opt = Vector{Float64}(undef, n_cap)
+
+    θ_i =  Matrix{Float64}(undef, d + 2, n_cap)
+
     write_idx         = 0
     total_shots_count = 0
     i_acq_list = Int[]
@@ -341,6 +341,8 @@ function bayesopt_ucb_threshold(f;
 
     θ_prev        = nothing
     n_iter_actual = n_iter
+    x_opt         = _rand_in_box(rng_local, lb, ub)  # initialised so it's defined if n_iter==0
+    m_opt         = -Inf
 
     for it in 1:n_iter
         do_opt = (it == 1) || (hyper_every > 0 && it % hyper_every == 0)
@@ -352,6 +354,7 @@ function bayesopt_ucb_threshold(f;
                           jitter=1e-8,
                           rng=rng_local)
         θ_prev = gp.θ
+        θ_i[:, it] = θ_prev
 
         # UCB acquisition
         best_x = _rand_in_box(rng_local, lb, ub)
@@ -377,10 +380,14 @@ function bayesopt_ucb_threshold(f;
             push!(i_acq_list, write_idx)
         end
         verbose && @info "it=$it best_acq=$best_a"
+        
+        x_opt, m_opt, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+        X_opt[:, it] = x_opt
+        mu_opt[it]    = maximize ? m_opt : -m_opt
 
         # mu_one_check: GPR mean ≥ threshold → confirm with a real sample
         if fidelity_threshold !== nothing
-            x_opt, m_opt, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+            
             if m_opt >= fidelity_threshold
                 y_opt, σy_opt = _call_f_raw(f, x_opt, n_shots)
                 total_shots_count += n_shots
@@ -391,47 +398,34 @@ function bayesopt_ucb_threshold(f;
                     σy[write_idx]   = σy_opt
                     push!(i_opt_list, write_idx)
                 end
-                y_hat_last = maximize ? m_opt : -m_opt
-                y_last     = y_opt
-                if y_last >= fidelity_threshold
+                y_last_opt     = maximize ? y_opt : -y_opt
+                if y_last_opt >= fidelity_threshold
                     n_iter_actual = it
                     y_out = maximize ? y[1:write_idx] : -y[1:write_idx]
                     return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
                                           i_acq_list, i_opt_list,
-                                          bounds, n_shots, n_init, n_iter, maximize,
-                                          x_opt, y_last, y_hat_last, n_iter_actual,
-                                          gp.ℓ, gp.σf, gp.c, total_shots_count)
+                                          X_opt[:, 1:it], mu_opt[1:it], y_last_opt, σy_opt,
+                                          n_iter_actual, θ_i, total_shots_count)
                 end
             end
         end
     end
 
-    # final GPR recommendation
-    gp = fit_heterogp(X[:, 1:write_idx], y[1:write_idx], σy[1:write_idx];
-                      θ_init=θ_prev,
-                      learn_hypers=true,
-                      learn_noise_scale=learn_noise_scale,
-                      n_restarts=n_restarts + 2,
-                      jitter=1e-8,
-                      rng=rng_local)
-
-    x_last, m_last, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
-    y_last, σy_last   = _call_f_raw(f, x_last, n_shots)
+    y_opt, σy_opt = _call_f_raw(f, x_opt, n_shots)
     total_shots_count += n_shots
-    if _is_far_enough(x_last, X, write_idx)
+    if _is_far_enough(x_opt, X, write_idx)
         write_idx += 1
-        X[:, write_idx] = x_last
-        y[write_idx]    = maximize ? y_last : -y_last
-        σy[write_idx]   = σy_last
+        X[:, write_idx] = x_opt
+        y[write_idx]    = maximize ? y_opt : -y_opt
+        σy[write_idx]   = σy_opt
         push!(i_opt_list, write_idx)
     end
-
-    y_hat_last = maximize ? m_last : -m_last
-    y_out      = maximize ? y[1:write_idx] : -y[1:write_idx]
+    y_last_opt    = maximize ? y_opt : -y_opt
+    n_iter_actual = n_iter
+    y_out         = maximize ? y[1:write_idx] : -y[1:write_idx]
 
     return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
                           i_acq_list, i_opt_list,
-                          bounds, n_shots, n_init, n_iter, maximize,
-                          x_last, y_last, y_hat_last, n_iter_actual,
-                          gp.ℓ, gp.σf, gp.c, total_shots_count)
+                          X_opt[:, 1:n_iter], mu_opt[1:n_iter], y_last_opt, σy_opt,
+                          n_iter_actual, θ_i, total_shots_count)
 end
