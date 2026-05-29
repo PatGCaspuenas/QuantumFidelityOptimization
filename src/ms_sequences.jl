@@ -181,24 +181,40 @@ end
 
 function Q_ms_sequence(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
                        subgates::AbstractVector{<:MSSubgate};
-                       N::Int=400,
+                       N::Real=400,
                        expected_gg::Float64=NaN,
                        expected_ee::Float64=NaN,
                        relative_phase::Float64=0.0,
-                       phase_drift::Float64=0.0)::Float64
+                       phase_drift::Float64=0.0,
+                       round_expected_to_shots::Bool=false)::Float64
+    n_eval = _shot_count_or_inf(N)
     pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
                                            relative_phase=relative_phase,
                                            phase_drift=phase_drift)
     pops = populations_ms_sequence(pulses)
     weights = Float64[max(pops.gg, 0.0), max(pops.ee, 0.0),
                       max(pops.eg, 0.0), max(pops.ge, 0.0)]
-    samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
-    P_SS = count(==(1), samples) / N
-    P_DD = count(==(2), samples) / N
-    if !isnan(expected_gg)
-        return 1.0 - (abs(expected_gg - P_SS) + abs(expected_ee - P_DD))
+    total = sum(weights)
+    total > 0.0 || throw(ArgumentError("Population weights must have positive total."))
+    weights ./= total
+    if isinf(Float64(n_eval))
+        P_SS = weights[1]
+        P_DD = weights[2]
+        target_gg = expected_gg
+        target_ee = expected_ee
+    else
+        samples = StatsBase.sample(1:4, StatsBase.Weights(weights), n_eval)
+        P_SS = count(==(1), samples) / n_eval
+        P_DD = count(==(2), samples) / n_eval
+        target_gg = (!isnan(expected_gg) && round_expected_to_shots) ?
+                    _round_probability_to_shots(expected_gg, n_eval) : expected_gg
+        target_ee = (!isnan(expected_ee) && round_expected_to_shots) ?
+                    _round_probability_to_shots(expected_ee, n_eval) : expected_ee
     end
-    return P_SS + P_DD
+    if !isnan(expected_gg)
+        return clamp(1.0 - (abs(target_gg - P_SS) + abs(target_ee - P_DD)), 0.0, 1.0)
+    end
+    return clamp(P_SS + P_DD, 0.0, 1.0)
 end
 
 function sequence_C_subgates()

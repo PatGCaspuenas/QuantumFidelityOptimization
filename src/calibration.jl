@@ -48,6 +48,21 @@ function _normalized_population_weights(values::NTuple{4,<:Real})
     return weights ./ total
 end
 
+function _shot_count_or_inf(N::Real)
+    n = Float64(N)
+    if isinf(n) && n > 0.0
+        return Inf
+    end
+    isfinite(n) || throw(ArgumentError("N must be a positive integer or Inf."))
+    isinteger(n) || throw(ArgumentError("N must be a positive integer or Inf, got $N."))
+    n_int = Int(n)
+    n_int > 0 || throw(ArgumentError("N must be positive."))
+    return n_int
+end
+
+_round_probability_to_shots(p::Real, n::Int) =
+    clamp(round(Float64(p) * n) / n, 0.0, 1.0)
+
 function _expected_ms_even_populations(numMS::Int)
     numMS ≥ 1 || throw(ArgumentError("numMS must be positive."))
     if isodd(numMS)
@@ -198,11 +213,12 @@ end
 Noisy Bell-state fidelity estimator based on sampled populations and a parity scan.
 The parity scan extracts the signed coherence at the target analysis phase, so
 accumulated Bell-phase errors reduce the returned fidelity instead of being fit away.
+Use `N=Inf` to return the Born-rule expectation value without projection sampling.
 """
 function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
                  phi_1::Float64=0.0, phi_2::Float64=0.0,
-                 N::Int=100, phase_grid::AbstractRange{Float64}=0.0:0.1:π)::Float64
-    N > 0 || throw(ArgumentError("N must be positive."))
+                 N::Real=100, phase_grid::AbstractRange{Float64}=0.0:0.1:π)::Float64
+    n_eval = _shot_count_or_inf(N)
     scan_phases = collect(Float64, phase_grid)
     length(scan_phases) ≥ 3 || throw(ArgumentError("phase_grid must contain at least 3 points."))
 
@@ -221,9 +237,12 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
 
     weights = _normalized_population_weights((SS, SD, DS, DD))
-
-    samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
-    P_odd = count(s -> s == 2 || s == 3, samples) / N
+    if isinf(Float64(n_eval))
+        P_odd = weights[2] + weights[3]
+    else
+        samples = StatsBase.sample(1:4, StatsBase.Weights(weights), n_eval)
+        P_odd = count(s -> s == 2 || s == 3, samples) / n_eval
+    end
 
     ρ_red = ptrace(sol[end] ⊗ dagger(sol[end]), [3])
     ρ = ion_sim_to_qo_operator(ρ_red)
@@ -244,8 +263,12 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
         p[4] = proj(DDs, ρφ)
         p .= _normalized_population_weights((p[1], p[2], p[3], p[4]))
 
-        s = StatsBase.sample(1:4, StatsBase.Weights(p), N)
-        meas[i] = sum(PARITY_VALUES[x] for x in s) / N
+        if isinf(Float64(n_eval))
+            meas[i] = sum(PARITY_VALUES[j] * p[j] for j in 1:4)
+        else
+            s = StatsBase.sample(1:4, StatsBase.Weights(p), n_eval)
+            meas[i] = sum(PARITY_VALUES[x] for x in s) / n_eval
+        end
     end
 
     X = hcat(cos.(2.0 .* scan_phases), sin.(2.0 .* scan_phases), ones(length(scan_phases)))
@@ -266,9 +289,11 @@ populations are inferred from `numMS`: odd counts target a balanced SS/DD readou
 `numMS % 4 == 2` targets DD, and `numMS % 4 == 0` targets SS.
 """
 function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
-                 N::Int=1000, numMS::Int=2,
-                 relative_phase::Float64=0.0, phase_drift::Float64=0.0)::Float64
-    N > 0 || throw(ArgumentError("N must be positive."))
+                 N::Real=1000, numMS::Int=2,
+                 relative_phase::Float64=0.0,
+                 phase_drift::Float64=0.0,
+                 round_expected_to_shots::Bool=false)::Float64
+    n_eval = _shot_count_or_inf(N)
     expected = _expected_ms_even_populations(numMS)
 
     setup = build_chamber()
@@ -294,13 +319,32 @@ function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
 
     # Q_varMS sampling order: 1=SS, 2=DD, 3=SD, 4=DS.
     weights = _normalized_population_weights((SS, DD, SD, DS))
-    samples = StatsBase.sample(1:4, StatsBase.Weights(weights), N)
+    if isinf(Float64(n_eval))
+        P_SS = weights[1]
+        P_DD = weights[2]
+        expected_SS = expected.SS
+        expected_DD = expected.DD
+    else
+        samples = StatsBase.sample(1:4, StatsBase.Weights(weights), n_eval)
+        P_SS = count(==(1), samples) / n_eval
+        P_DD = count(==(2), samples) / n_eval
+        expected_SS = round_expected_to_shots ?
+                      _round_probability_to_shots(expected.SS, n_eval) : expected.SS
+        expected_DD = round_expected_to_shots ?
+                      _round_probability_to_shots(expected.DD, n_eval) : expected.DD
+    end
 
-    P_SS = count(==(1), samples) / N
-    P_DD = count(==(2), samples) / N
-
-    score = 1.0 - (abs(expected.SS - P_SS) + abs(expected.DD - P_DD))
+    score = 1.0 - (abs(expected_SS - P_SS) + abs(expected_DD - P_DD))
     return clamp(score, 0.0, 1.0)
+end
+
+function _varms_success_probability(weights::AbstractVector{<:Real}, numMS::Int)
+    if isodd(numMS)
+        return Float64(weights[1] + weights[2])   # SS or DD
+    elseif numMS % 4 == 2
+        return Float64(weights[2])                # DD only
+    end
+    return Float64(weights[1])                    # SS only
 end
 
 """
@@ -314,12 +358,16 @@ projection noise.  For each of `N` shots:
   4. Sample a single measurement outcome from the population probabilities
 
 Returns fraction of successful outcomes / N.
+
+Use `N=Inf` to return the nominal Born-rule success probability without
+projection sampling or shot-to-shot parameter draws.
 """
 function Q_mc_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
-                    N::Int=50, numMS::Int=2,
+                    N::Real=50, numMS::Int=2,
                     phi_1::Float64=0.0, phi_2::Float64=0.0,
                     δ_rms_hz::Float64=300.0, Ω_rms_frac::Float64=0.007,
                     rng::Random.AbstractRNG=Random.default_rng())::Float64
+    n_eval = _shot_count_or_inf(N)
 
     setup = build_chamber()
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
@@ -334,8 +382,23 @@ function Q_mc_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
         s -> s == 1             # SS only
     end
 
+    if isinf(Float64(n_eval))
+        configure_lasers!(setup, f_cl, Δ, I; phi_1=phi_1, phi_2=phi_2)
+        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
+        _, sol = timeevolution.schroedinger_dynamic(tout, init_state, h)
+        for _ in 2:numMS
+            _, sol = timeevolution.schroedinger_dynamic(tout, sol[end], h)
+        end
+        SS = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
+        DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
+        SD = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
+        DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
+        weights = _normalized_population_weights((SS, DD, SD, DS))
+        return clamp(_varms_success_probability(weights, numMS), 0.0, 1.0)
+    end
+
     successes = 0
-    for _ in 1:N
+    for _ in 1:n_eval
         # Shot-to-shot parameter perturbation
         δ  = randn(rng) * δ_rms_hz * 2π
         ε  = randn(rng) * Ω_rms_frac
@@ -365,5 +428,5 @@ function Q_mc_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
         end
     end
 
-    return successes / N
+    return successes / n_eval
 end

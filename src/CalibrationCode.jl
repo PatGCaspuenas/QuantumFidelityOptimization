@@ -37,7 +37,7 @@ export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy, Q_varMS, Q_mc_varMS,
 export BOResult, bayesopt
 
 # Heteroscedastic BO
-export HeteroGP, HeteroBOResult
+export HeteroGP, HeteroBOResult, PathGuardConfig
 export fit_heterogp, predict_latent
 export bayesopt_ucb_threshold
 
