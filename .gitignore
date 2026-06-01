@@ -5,7 +5,7 @@ figures/*
 others/
 docs/
 .claude/
-
+.venv/
 data/*
 
 # BO trace data (scale sweep + selected-N full_l1)
