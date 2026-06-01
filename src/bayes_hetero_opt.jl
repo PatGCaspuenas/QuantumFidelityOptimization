@@ -5,7 +5,6 @@ using Random
 using Statistics
 using LinearAlgebra
 using Optim
-using SpecialFunctions: erf
 using QuasiMonteCarlo
 
 # -------------------------
@@ -360,7 +359,7 @@ struct HeteroBOResult
     y::Vector{Float64}                    # sign-adjusted if maximize=false
     σy::Vector{Float64}                   # noise std per observation
     bounds::Vector{Tuple{Float64,Float64}}
-    n_shots::Int                          # shots per f call
+    n_shots::Union{Int,Float64}           # shots per f call; Inf means deterministic expectation
     n_init::Int
     n_iter::Int
     maximize::Bool
@@ -371,14 +370,44 @@ struct HeteroBOResult
     ℓ_final::Vector{Float64}             # final GP lengthscales (original scale)
     σf_final::Float64                    # final GP signal std (original scale)
     c_final::Float64                     # final GP noise scale (original scale)
-    total_shots::Int                      # total shots used across ALL f calls (incl. check calls not in X)
-    # Per-iteration trace (empty matrices/vectors when collect_trace=false)
-    x_acq_trace::Matrix{Float64}          # d × n_iters_run  — acquisition candidate selected each iter
-    x_rec_trace::Matrix{Float64}          # d × n_iters_run  — GP mean maximizer each iter
-    m_rec_trace::Vector{Float64}          # GP predicted mean at x_rec each iter
-    s_rec_trace::Vector{Float64}          # GP predicted std  at x_rec each iter
-    y_acq_trace::Vector{Float64}          # noisy f value at x_acq each iter
-    y_check_trace::Vector{Float64}        # noisy f at x_rec when queried (NaN otherwise)
+    total_shots::Union{Int,Float64}       # total shots used across ALL f calls (incl. check calls not in X)
+end
+
+Base.@kwdef struct PathGuardConfig
+    init_design::Symbol = :random
+    init_center_exclusion_radius::Float64 = 0.0
+    init_sobol_skip_max::Int = 2048
+    decision_q_max::Float64 = 1.0
+    global_scout_period::Int = 7
+    global_scout_frac::Float64 = 0.15
+    stagnation_window::Int = 12
+    boundary_margin::Float64 = 0.03
+    ell_hi::Float64 = 1.45
+    sigmaf_lo::Float64 = 0.35
+    c_hi::Float64 = 2.5
+    trust_start_q::Float64 = 0.70
+    strong_trust_q::Float64 = 0.90
+    trust_radius::Float64 = 0.25
+    trust_radius_min::Float64 = 0.12
+    mid_local_frac::Float64 = 0.35
+    strong_local_frac::Float64 = 0.70
+    min_support_count::Int = 2
+    support_radius::Float64 = 0.25
+    scout_batch::Int = 2
+    pretrust_kappa::Float64 = 2.25
+    mid_kappa::Float64 = 1.90
+    exploit_kappa::Float64 = 0.50
+end
+
+function _validate_shot_count(n_shots::Real, name::String)
+    n = Float64(n_shots)
+    if isinf(n) && n > 0.0
+        return nothing
+    end
+    isfinite(n) || throw(ArgumentError("$name must be a positive integer or Inf."))
+    isinteger(n) || throw(ArgumentError("$name must be a positive integer or Inf, got $n_shots."))
+    n ≥ 1 || throw(ArgumentError("$name must be ≥ 1, got $n_shots"))
+    return nothing
 end
 
 @inline function _validate_bounds(bounds)
@@ -403,9 +432,12 @@ end
     return true
 end
 
-@inline function _call_f_raw(f, x::Vector{Float64}, n::Int)
+# f(x, N) must return a tuple (y::Float64, σy::Float64).
+# y  is the fidelity observation (linear Q scale).
+# σy is the GP observation noise: √(Q(1-Q)/N) for binomial noise model.
+@inline function _call_f_raw(f, x::Vector{Float64}, n::Real)
     result = f(x, n)
-    result isa Tuple || throw(ArgumentError("f must return a (y, σy) tuple when called with N::Int"))
+    result isa Tuple || throw(ArgumentError("f must return a (y, σy) tuple"))
     return Float64(result[1]), Float64(result[2])
 end
 
@@ -418,6 +450,230 @@ end
     return x
 end
 
+function _rand_near_box(rng::Random.AbstractRNG, center::Vector{Float64},
+                        lb::Vector{Float64}, ub::Vector{Float64}, radius::Float64)
+    x = Vector{Float64}(undef, length(lb))
+    @inbounds for j in eachindex(lb)
+        x[j] = clamp(center[j] + (2.0 * rand(rng) - 1.0) * radius, lb[j], ub[j])
+    end
+    return x
+end
+
+function _latin_hypercube_points(rng::Random.AbstractRNG, lb::Vector{Float64},
+                                 ub::Vector{Float64}, n_init::Int)
+    X = QuasiMonteCarlo.sample(n_init, lb, ub, LatinHypercubeSample(rng))
+    return [Vector{Float64}(X[:, i]) for i in 1:n_init]
+end
+
+_is_prime_int(n::Int) = n >= 2 && all(n % k != 0 for k in 2:floor(Int, sqrt(n)))
+
+@inline _gf4_add(a::Int, b::Int) = xor(a, b)
+
+@inline function _gf4_mul(a::Int, b::Int)
+    (a == 0 || b == 0) && return 0
+    # GF(4) with primitive polynomial x^2 + x + 1.
+    table = ((1, 2, 3),
+             (2, 3, 1),
+             (3, 1, 2))
+    return table[a][b]
+end
+
+@inline function _oa_symbol_sum(a::Int, b::Int, slope::Int, p::Int)
+    if p == 4
+        return _gf4_add(a, _gf4_mul(slope, b))
+    end
+    return mod(a + slope * b, p)
+end
+
+function _oa_lhs_points(rng::Random.AbstractRNG, lb::Vector{Float64},
+                        ub::Vector{Float64}, n_init::Int)
+    p = round(Int, sqrt(n_init))
+    p * p == n_init ||
+        throw(ArgumentError("orthogonal-array LHS requires n_init = p^2, got $n_init"))
+    (_is_prime_int(p) || p == 4) ||
+        throw(ArgumentError("orthogonal-array LHS requires prime or supported prime-power p, got p=$p"))
+    d = length(lb)
+    d <= p + 1 ||
+        throw(ArgumentError("orthogonal-array LHS requires dimension <= p + 1; got d=$d, p=$p"))
+
+    A = Matrix{Int}(undef, n_init, d)
+    row = 0
+    for a in 0:(p - 1), b in 0:(p - 1)
+        row += 1
+        A[row, 1] = a
+        d >= 2 && (A[row, 2] = b)
+        for j in 3:d
+            slope = j - 2
+            A[row, j] = _oa_symbol_sum(a, b, slope, p)
+        end
+    end
+
+    X = Matrix{Float64}(undef, d, n_init)
+    @inbounds for j in 1:d
+        symbol_map = randperm(rng, p) .- 1
+        symbols = [symbol_map[A[i, j] + 1] for i in 1:n_init]
+        span = ub[j] - lb[j]
+        for level in 0:(p - 1)
+            rows = findall(==(level), symbols)
+            sublevels = randperm(rng, p) .- 1
+            for (k, i) in enumerate(rows)
+                fine_stratum = level * p + sublevels[k]
+                u = (fine_stratum + rand(rng)) / n_init
+                X[j, i] = lb[j] + u * span
+            end
+        end
+    end
+    return [Vector{Float64}(X[:, i]) for i in 1:n_init]
+end
+
+function _path_guard_initial_points(rng::Random.AbstractRNG, lb::Vector{Float64},
+                                    ub::Vector{Float64}, n_init::Int,
+                                    cfg::PathGuardConfig)
+    if cfg.init_design == :random
+        return [_rand_in_box(rng, lb, ub) for _ in 1:n_init]
+    end
+
+    if cfg.init_design in (:lhs, :latin_hypercube, :latin_hypercube_random)
+        return _latin_hypercube_points(rng, lb, ub, n_init)
+    end
+
+    if cfg.init_design in (:oa_lhs, :orthogonal_lhs, :orthogonal_array_lhs,
+                           :orthogonal_latin_hypercube)
+        return _oa_lhs_points(rng, lb, ub, n_init)
+    end
+
+    d = length(lb)
+    center = 0.5 .* (lb .+ ub)
+    points = Vector{Vector{Float64}}()
+
+    if cfg.init_design in (:sobol_random, :sobol_randomized, :sobol)
+        skip = rand(rng, 0:max(cfg.init_sobol_skip_max, 0))
+        shift = rand(rng, d)
+        need = n_init + skip + 64
+        while length(points) < n_init
+            qmc = QuasiMonteCarlo.sample(need, lb, ub, SobolSample())
+            for i in (skip + 1):size(qmc, 2)
+                x = Vector{Float64}(qmc[:, i])
+                # A random digital shift keeps the low-discrepancy structure
+                # while preventing every seed from seeing the same design.
+                @inbounds for j in 1:d
+                    span = ub[j] - lb[j]
+                    u = (x[j] - lb[j]) / span
+                    u = mod(u + shift[j], 1.0)
+                    x[j] = lb[j] + u * span
+                end
+                norm(x .- center) < cfg.init_center_exclusion_radius && continue
+                push!(points, x)
+                length(points) >= n_init && break
+            end
+            need *= 2
+        end
+        return points[1:n_init]
+    end
+
+    throw(ArgumentError("unknown init_design=$(cfg.init_design); use :random, :latin_hypercube, :oa_lhs, or :sobol_random"))
+end
+
+function _min_dist2_to_design(x::Vector{Float64}, X::Matrix{Float64}, n::Int)
+    n == 0 && return Inf
+    best = Inf
+    @inbounds for i in 1:n
+        d2 = 0.0
+        for j in eachindex(x)
+            delta = x[j] - X[j, i]
+            d2 += delta * delta
+        end
+        best = min(best, d2)
+    end
+    return best
+end
+
+function _maximin_candidate(rng::Random.AbstractRNG, lb::Vector{Float64},
+                            ub::Vector{Float64}, X::Matrix{Float64}, n::Int;
+                            M::Int=1000)
+    best_x = _rand_in_box(rng, lb, ub)
+    best_d2 = _min_dist2_to_design(best_x, X, n)
+    for _ in 2:max(M, 2)
+        x = _rand_in_box(rng, lb, ub)
+        d2 = _min_dist2_to_design(x, X, n)
+        if d2 > best_d2
+            best_d2 = d2
+            best_x = x
+        end
+    end
+    return best_x
+end
+
+function _local_support_stats(X::Matrix{Float64}, y::Vector{Float64}, n::Int,
+                              center::Vector{Float64}, radius::Float64)
+    count = 0
+    total = 0.0
+    r2 = radius * radius
+    @inbounds for i in 1:n
+        d2 = 0.0
+        for j in eachindex(center)
+            delta = center[j] - X[j, i]
+            d2 += delta * delta
+        end
+        if d2 <= r2
+            count += 1
+            total += y[i]
+        end
+    end
+    return count, count > 0 ? total / count : -Inf
+end
+
+function _best_supported_observation(X::Matrix{Float64}, y::Vector{Float64}, n::Int,
+                                     cfg::PathGuardConfig)
+    best_avg = -Inf
+    best_count = 0
+    best_x = Vector{Float64}(undef, size(X, 1))
+    @inbounds for i in 1:n
+        x = Vector{Float64}(X[:, i])
+        count, avg = _local_support_stats(X, y, n, x, cfg.support_radius)
+        if count >= cfg.min_support_count && avg > best_avg
+            best_avg = avg
+            best_count = count
+            best_x = x
+        end
+    end
+    return best_x, best_avg, best_count
+end
+
+function _near_boundary(x::Vector{Float64}, lb::Vector{Float64},
+                        ub::Vector{Float64}, margin::Float64)
+    @inbounds for j in eachindex(x)
+        span = ub[j] - lb[j]
+        if x[j] - lb[j] <= margin * span || ub[j] - x[j] <= margin * span
+            return true
+        end
+    end
+    return false
+end
+
+function _gp_health_bad(gp::HeteroGP, cfg::PathGuardConfig)
+    return count(>=(cfg.ell_hi), gp.ℓ) >= 2 ||
+           gp.σf <= cfg.sigmaf_lo ||
+           gp.c >= cfg.c_hi
+end
+
+@inline _decision_mean(μ::Float64, cfg::PathGuardConfig) =
+    clamp(μ, 0.0, cfg.decision_q_max)
+
+@inline function _path_guard_kappa(supported_q::Float64, cfg::PathGuardConfig)
+    supported_q >= cfg.strong_trust_q && return cfg.exploit_kappa
+    supported_q >= cfg.trust_start_q && return cfg.mid_kappa
+    return cfg.pretrust_kappa
+end
+
+@inline function _path_guard_local_frac(supported_q::Float64, cfg::PathGuardConfig)
+    supported_q >= cfg.strong_trust_q && return cfg.strong_local_frac
+    supported_q >= cfg.trust_start_q && return cfg.mid_local_frac
+    return 0.0
+end
+
+# μ is the fidelity of the GP at the given point. s2 is the variance.
+# The larger kappa is, the more exploration the acquisition function does.
 @inline ucb_score(μ::Float64, s2::Float64, κ::Float64) = μ + κ * sqrt(max(s2, 0.0))
 
 @inline _normal_cdf(z::Float64) = 0.5 * (1.0 + erf(z / sqrt(2.0)))
@@ -750,6 +1006,33 @@ function recommend_mean(gp::HeteroGP, bounds;
     return best_x, best_m, best_s
 end
 
+function _recommend_mean_path_guard(gp::HeteroGP, bounds, cfg::PathGuardConfig;
+                                    M::Int=20000,
+                                    rng::Random.AbstractRNG=Random.default_rng(),
+                                    center::Union{Nothing,Vector{Float64}}=nothing,
+                                    local_frac::Float64=0.0)
+    M ≥ 1 || throw(ArgumentError("M must be ≥ 1"))
+    lb = Float64[b[1] for b in bounds]
+    ub = Float64[b[2] for b in bounds]
+    best_x = _rand_in_box(rng, lb, ub)
+    μ0, s2_0 = predict_latent(gp, best_x)
+    best_m = _decision_mean(μ0, cfg)
+    best_s = sqrt(max(s2_0, 0.0))
+    for _ in 1:M
+        use_local = center !== nothing && rand(rng) < local_frac
+        x = use_local ? _rand_near_box(rng, center, lb, ub, cfg.trust_radius) :
+                        _rand_in_box(rng, lb, ub)
+        μ, s2 = predict_latent(gp, x)
+        μ_dec = _decision_mean(μ, cfg)
+        if μ_dec > best_m
+            best_m = μ_dec
+            best_s = sqrt(max(s2, 0.0))
+            best_x = x
+        end
+    end
+    return best_x, best_m, best_s
+end
+
 # -------------------------
 # Variable-N helper
 # -------------------------
@@ -820,7 +1103,7 @@ Set `maximize=false` to minimize. Use `seed` for reproducibility.
 """
 function bayesopt_ucb_threshold(f;
                                bounds::Vector{Tuple{Float64,Float64}},
-                               n_shots::Int=400,
+                               n_shots::Union{Int,Float64}=400,
                                n_init::Int=8,
                                n_iter::Int=30,
                                M_acq::Int=20000,
@@ -834,6 +1117,8 @@ function bayesopt_ucb_threshold(f;
                                verbose::Bool=false,
                                fidelity_threshold::Union{Nothing,Float64}=nothing,
                                explore_frac::Float64=0.0,
+                               path_guard::Bool=false,
+                               path_guard_config::PathGuardConfig=PathGuardConfig(),
                                learn_noise_scale::Bool=true,
                                n_restarts::Int=6,
                                use_variable_mode::Bool=false,
@@ -865,7 +1150,8 @@ function bayesopt_ucb_threshold(f;
     M_rec ≥ 1  || throw(ArgumentError("M_rec must be ≥ 1"))
     κ ≥ 0      || throw(ArgumentError("κ must be ≥ 0"))
     α ≥ 0      || throw(ArgumentError("α must be ≥ 0"))
-    n_shots ≥ 1   || throw(ArgumentError("n_shots must be ≥ 1"))
+    0.0 <= explore_frac <= 1.0 || throw(ArgumentError("explore_frac must be in [0, 1]"))
+    _validate_shot_count(n_shots, "n_shots")
     n_floor ≥ 1 || throw(ArgumentError("n_floor must be ≥ 1"))
     n_max_shots ≥ n_floor || throw(ArgumentError("n_max_shots must be ≥ n_floor"))
     k_acq ≥ 1 || throw(ArgumentError("k_acq must be ≥ 1"))
@@ -886,15 +1172,12 @@ function bayesopt_ucb_threshold(f;
     write_idx         = 0
     total_shots_count = 0
 
-    init_pts = if init_method == "sobol"
-        QuasiMonteCarlo.sample(n_init, lb, ub, QuasiMonteCarlo.SobolSample())
-    elseif init_method == "lhs"
-        QuasiMonteCarlo.sample(n_init, lb, ub, QuasiMonteCarlo.LatinHypercubeSample())
-    else
-        hcat([_rand_in_box(rng_local, lb, ub) for _ in 1:n_init]...)
-    end
-    for i in 1:n_init
-        x = init_pts[:, i]
+    # Initial design: uniform random by default; optional structured design for
+    # path-guard runs so initial coverage does not depend on a lucky seed.
+    init_points = (path_guard || path_guard_config.init_design != :random) ?
+        _path_guard_initial_points(rng_local, lb, ub, n_init, path_guard_config) :
+        [_rand_in_box(rng_local, lb, ub) for _ in 1:n_init]
+    for x in init_points
         y_raw, σy_i = _call_f_raw(f, x, n_shots)
         total_shots_count += n_shots
         write_idx += 1
@@ -906,20 +1189,10 @@ function bayesopt_ucb_threshold(f;
     θ_prev = nothing
     n_iter_actual = n_iter
     y_last_val = 0.0
-
-    # Helper to slice trace arrays up to iteration `n` for early returns
-    _tr_mat(m, n) = collect_trace ? m[:, 1:n] : zeros(0, 0)
-    _tr_vec(v, n) = collect_trace ? v[1:n]    : Float64[]
-
-    # Trace preallocations (empty when not collecting)
-    collect_trace && fidelity_threshold === nothing &&
-        throw(ArgumentError("collect_trace requires fidelity_threshold to be set"))
-    x_acq_tr = collect_trace ? Matrix{Float64}(undef, d, n_iter) : zeros(0, 0)
-    x_rec_tr  = collect_trace ? Matrix{Float64}(undef, d, n_iter) : zeros(0, 0)
-    m_rec_tr  = collect_trace ? Vector{Float64}(undef, n_iter)    : Float64[]
-    s_rec_tr  = collect_trace ? Vector{Float64}(undef, n_iter)    : Float64[]
-    y_acq_tr  = collect_trace ? Vector{Float64}(undef, n_iter)    : Float64[]
-    y_chk_tr  = collect_trace ? fill(NaN, n_iter)                 : Float64[]
+    scout_remaining = 0
+    last_supported_q = -Inf
+    stagnation_count = 0
+    boundary_streak = 0
 
     for it in 1:n_iter
         do_opt = (it == 1) || (hyper_every > 0 && it % hyper_every == 0)
@@ -933,23 +1206,65 @@ function bayesopt_ucb_threshold(f;
                           rng=rng_local)
         θ_prev = gp.θ
 
-        f_best_cur = acq_type ∈ ("ei", "us_ei", "feas_ei") ? maximum(y[1:write_idx]) : 0.0
-        best_x, best_a = _acquire_topk(gp, lb, ub, κ;
-                                        acq_type=acq_type,
-                                        f_best=f_best_cur,
-                                        ξ_ei=ξ_ei,
-                                        feas_threshold=feas_threshold,
-                                        M_acq=M_acq,
-                                        k_acq=k_acq,
-                                        min_sep=min_sep,
-                                        use_zoom=use_zoom,
-                                        M_zoom=M_zoom,
-                                        zoom_radius=zoom_radius,
-                                        use_lbfgs_acq=use_lbfgs_acq,
-                                        use_grad_acq=use_grad_acq,
-                                        mes_n_samples=mes_n_samples,
-                                        rng=rng_local)
+        supported_x, supported_q, supported_count =
+            path_guard ? _best_supported_observation(X, y, write_idx, path_guard_config) :
+                         (Vector{Float64}(), -Inf, 0)
+        if path_guard
+            if supported_q > last_supported_q + 1e-6
+                last_supported_q = supported_q
+                stagnation_count = 0
+            else
+                stagnation_count += 1
+            end
+            if _gp_health_bad(gp, path_guard_config) ||
+               stagnation_count >= path_guard_config.stagnation_window ||
+               boundary_streak >= 3
+                scout_remaining = max(scout_remaining, path_guard_config.scout_batch)
+            end
+        end
 
+        # Acquisition: GP-UCB by default. `explore_frac` now forces genuine
+        # maximin scouts instead of being a no-op.
+        force_scout = false
+        if path_guard
+            force_scout = scout_remaining > 0 ||
+                          (path_guard_config.global_scout_period > 0 &&
+                           it % path_guard_config.global_scout_period == 0) ||
+                          rand(rng_local) < path_guard_config.global_scout_frac
+        else
+            force_scout = explore_frac > 0.0 && rand(rng_local) < explore_frac
+        end
+
+        best_x = _rand_in_box(rng_local, lb, ub)
+        best_a = -Inf
+
+        if force_scout
+            best_x = _maximin_candidate(rng_local, lb, ub, X, write_idx; M=M_acq)
+            μ, s2 = predict_latent(gp, best_x)
+            μ_dec = path_guard ? _decision_mean(μ, path_guard_config) : μ
+            best_a = ucb_score(μ_dec, s2, path_guard ? _path_guard_kappa(supported_q, path_guard_config) : κ)
+            scout_remaining = max(scout_remaining - 1, 0)
+        else
+            κ_eff = path_guard ? _path_guard_kappa(supported_q, path_guard_config) : κ
+            local_frac = path_guard ? _path_guard_local_frac(supported_q, path_guard_config) : 0.0
+            for _ in 1:M_acq
+                use_local = path_guard && supported_count >= path_guard_config.min_support_count &&
+                            rand(rng_local) < local_frac
+                x = use_local ? _rand_near_box(rng_local, supported_x, lb, ub,
+                                               max(path_guard_config.trust_radius_min,
+                                                   path_guard_config.trust_radius)) :
+                                _rand_in_box(rng_local, lb, ub)
+                μ, s2 = predict_latent(gp, x)
+                μ_dec = path_guard ? _decision_mean(μ, path_guard_config) : μ
+                a = ucb_score(μ_dec, s2, κ_eff)
+                if a > best_a
+                    best_a = a
+                    best_x = x
+                end
+            end
+        end
+
+        # Acquisition N: n_shots for fixed mode, n_floor for variable mode
         n_acq = use_variable_mode ? n_floor : n_shots
 
         y_raw, σy_i = _call_f_raw(f, best_x, n_acq)
@@ -972,7 +1287,14 @@ function bayesopt_ucb_threshold(f;
         end
 
         if use_variable_mode
-            x_rec_cur, _, _ = recommend_mean(gp, bounds; M=M_rec, k=k_acq, min_sep=min_sep, use_grad=use_grad_acq, rng=rng_local)
+            rec_center = path_guard && supported_count >= path_guard_config.min_support_count ? supported_x : nothing
+            rec_local_frac = path_guard ? _path_guard_local_frac(supported_q, path_guard_config) : 0.0
+            x_rec_cur, _, _ = path_guard ?
+                _recommend_mean_path_guard(gp, bounds, path_guard_config;
+                                           M=M_rec, rng=rng_local,
+                                           center=rec_center,
+                                           local_frac=rec_local_frac) :
+                recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
             y_rec_cur, σy_rec_cur, n_rec, stop_loop = _adaptive_measure(
                 f, x_rec_cur, n_floor, n_max_shots, fidelity_threshold, maximize)
             total_shots_count += n_rec
@@ -984,7 +1306,16 @@ function bayesopt_ucb_threshold(f;
                 σy[write_idx] = σy_rec_cur
             end
 
-            if stop_loop
+            stop_supported = true
+            if path_guard
+                support_n, support_avg = _local_support_stats(
+                    X, y, write_idx, x_rec_cur, path_guard_config.support_radius)
+                stop_supported = support_n >= path_guard_config.min_support_count &&
+                                 support_avg >= path_guard_config.trust_start_q &&
+                                 !_gp_health_bad(gp, path_guard_config)
+            end
+
+            if stop_loop && stop_supported
                 n_iter_actual = it
                 y_out = maximize ? y[1:write_idx] : -y[1:write_idx]
                 return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
@@ -997,92 +1328,51 @@ function bayesopt_ucb_threshold(f;
         end
 
         if fidelity_threshold !== nothing && !use_variable_mode
-            x_rec_cur, m_rec, s_rec = recommend_mean(gp, bounds; M=M_rec, k=k_acq, min_sep=min_sep, use_grad=use_grad_acq, rng=rng_local)
-
-            if collect_trace
-                x_rec_tr[:, it] = x_rec_cur
-                m_rec_tr[it]    = maximize ? m_rec : -m_rec
-                s_rec_tr[it]    = s_rec
+            rec_center = path_guard && supported_count >= path_guard_config.min_support_count ? supported_x : nothing
+            rec_local_frac = path_guard ? _path_guard_local_frac(supported_q, path_guard_config) : 0.0
+            x_rec_cur, _, _ = path_guard ?
+                _recommend_mean_path_guard(gp, bounds, path_guard_config;
+                                           M=M_rec, rng=rng_local,
+                                           center=rec_center,
+                                           local_frac=rec_local_frac) :
+                recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+            y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
+            total_shots_count += n_shots
+            if _is_far_enough(x_rec_cur, X, write_idx)
+                write_idx += 1
+                X[:, write_idx] = x_rec_cur
+                y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
+                σy[write_idx] = σy1_i
             end
 
-            if stop_mode == "lcb"
-                # Stop when GP lower-confidence bound exceeds threshold (no f-call needed)
-                lcb = maximize ? (m_rec - κ_stop * s_rec) : (m_rec + κ_stop * s_rec)
-                lcb_reached = maximize ? (lcb >= fidelity_threshold) : (lcb <= fidelity_threshold)
-                if lcb_reached
+            y1 = maximize ? y_rec_cur : -y_rec_cur
+            if path_guard
+                boundary_streak = _near_boundary(x_rec_cur, lb, ub, path_guard_config.boundary_margin) ?
+                    boundary_streak + 1 : 0
+            end
+            stop_supported = true
+            if path_guard
+                support_n, support_avg = _local_support_stats(
+                    X, y, write_idx, x_rec_cur, path_guard_config.support_radius)
+                stop_supported = support_n >= path_guard_config.min_support_count &&
+                                 support_avg >= path_guard_config.trust_start_q &&
+                                 !_gp_health_bad(gp, path_guard_config)
+            end
+            reached1 = maximize ? (y1 >= fidelity_threshold) : (y1 <= fidelity_threshold)
+            if reached1 && stop_supported
+                y2_raw, _ = _call_f_raw(f, x_rec_cur, n_shots)
+                total_shots_count += n_shots
+                y2 = maximize ? y2_raw : -y2_raw
+                reached2 = maximize ? (y2 >= fidelity_threshold) : (y2 <= fidelity_threshold)
+                if reached2
                     n_iter_actual = it
+                    y_rec_avg = (y_rec_cur + y2_raw) / 2
                     y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
                     return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
                                           bounds, n_shots, n_init, n_iter, maximize,
-                                          x_rec_cur, maximize ? m_rec : -m_rec, n_iter_actual,
+                                          x_rec_cur, y_rec_avg, n_iter_actual,
                                           maximize ? y_last_val : -y_last_val,
-                                          gp.ℓ, gp.σf, gp.c, total_shots_count,
-                                          _tr_mat(x_acq_tr, it), _tr_mat(x_rec_tr, it),
-                                          _tr_vec(m_rec_tr, it), _tr_vec(s_rec_tr, it),
-                                          _tr_vec(y_acq_tr, it), _tr_vec(y_chk_tr, it))
-                end
-
-            elseif stop_mode == "mu_one_check"
-                # Stop when GP mean exceeds threshold AND one f-call confirms it
-                mu_reached = maximize ? (m_rec >= fidelity_threshold) : (m_rec <= fidelity_threshold)
-                if mu_reached
-                    y_chk, σy_chk = _call_f_raw(f, x_rec_cur, n_shots)
-                    total_shots_count += n_shots
-                    collect_trace && (y_chk_tr[it] = y_chk)
-                    # Always add to training set
-                    if _is_far_enough(x_rec_cur, X, write_idx)
-                        write_idx += 1
-                        X[:, write_idx] = x_rec_cur
-                        y[write_idx]  = maximize ? y_chk : -y_chk
-                        σy[write_idx] = σy_chk
-                    end
-                    y_chk_signed = maximize ? y_chk : -y_chk
-                    chk_reached  = maximize ? (y_chk_signed >= fidelity_threshold) : (y_chk_signed <= fidelity_threshold)
-                    if chk_reached
-                        n_iter_actual = it
-                        y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
-                        return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
-                                              bounds, n_shots, n_init, n_iter, maximize,
-                                              x_rec_cur, y_chk, n_iter_actual,
-                                              maximize ? y_last_val : -y_last_val,
-                                              gp.ℓ, gp.σf, gp.c, total_shots_count,
-                                              _tr_mat(x_acq_tr, it), _tr_mat(x_rec_tr, it),
-                                              _tr_vec(m_rec_tr, it), _tr_vec(s_rec_tr, it),
-                                              _tr_vec(y_acq_tr, it), _tr_vec(y_chk_tr, it))
-                    end
-                end
-
-            else  # "two_checks" (default)
-                y_rec_cur, σy1_i = _call_f_raw(f, x_rec_cur, n_shots)
-                total_shots_count += n_shots
-                collect_trace && (y_chk_tr[it] = y_rec_cur)
-                if _is_far_enough(x_rec_cur, X, write_idx)
-                    write_idx += 1
-                    X[:, write_idx] = x_rec_cur
-                    y[write_idx]  = maximize ? y_rec_cur : -y_rec_cur
-                    σy[write_idx] = σy1_i
-                end
-
-                y1 = maximize ? y_rec_cur : -y_rec_cur
-                reached1 = maximize ? (y1 >= fidelity_threshold) : (y1 <= fidelity_threshold)
-                if reached1
-                    y2_raw, _ = _call_f_raw(f, x_rec_cur, n_shots)
-                    total_shots_count += n_shots
-                    y2 = maximize ? y2_raw : -y2_raw
-                    reached2 = maximize ? (y2 >= fidelity_threshold) : (y2 <= fidelity_threshold)
-                    if reached2
-                        n_iter_actual = it
-                        y_rec_avg = (y_rec_cur + y2_raw) / 2
-                        y_out_es = maximize ? y[1:write_idx] : -y[1:write_idx]
-                        return HeteroBOResult(X[:, 1:write_idx], y_out_es, σy[1:write_idx],
-                                              bounds, n_shots, n_init, n_iter, maximize,
-                                              x_rec_cur, y_rec_avg, n_iter_actual,
-                                              maximize ? y_last_val : -y_last_val,
-                                              gp.ℓ, gp.σf, gp.c, total_shots_count,
-                                              _tr_mat(x_acq_tr, it), _tr_mat(x_rec_tr, it),
-                                              _tr_vec(m_rec_tr, it), _tr_vec(s_rec_tr, it),
-                                              _tr_vec(y_acq_tr, it), _tr_vec(y_chk_tr, it))
-                    end
+                                          gp.ℓ, gp.σf, gp.c, total_shots_count)
                 end
             end
         end
@@ -1097,7 +1387,17 @@ function bayesopt_ucb_threshold(f;
                       jitter=1e-8,
                       rng=rng_local)
 
-    x_rec, _, _ = recommend_mean(gp, bounds; M=M_rec, k=k_acq, min_sep=min_sep, use_grad=use_grad_acq, rng=rng_local)
+    if path_guard
+        supported_x, supported_q, supported_count =
+            _best_supported_observation(X, y, write_idx, path_guard_config)
+        rec_center = supported_count >= path_guard_config.min_support_count ? supported_x : nothing
+        x_rec, _, _ = _recommend_mean_path_guard(
+            gp, bounds, path_guard_config;
+            M=M_rec, rng=rng_local, center=rec_center,
+            local_frac=_path_guard_local_frac(supported_q, path_guard_config))
+    else
+        x_rec, _, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+    end
     y_rec_raw, _ = _call_f_raw(f, x_rec, n_shots)
     total_shots_count += n_shots
 

@@ -185,6 +185,7 @@ def plot_shots_vs_fidelity(files, output_file=None, max_iterations=120, labels=N
 
             if itr == max_iterations:
                 n_unconverged += 1
+                continue
 
             # Total shots: prefer TotalShots column; fall back to old-format estimate
             lx = None
@@ -290,15 +291,16 @@ def plot_shots_vs_fidelity(files, output_file=None, max_iterations=120, labels=N
 
 if __name__ == '__main__':
     script_dir = Path(__file__).parent
-    data_dir   = script_dir / 'data' / 'jacobian'
+    repo_root  = script_dir.parent
+    data_dir   = repo_root / 'data'
     figures_dir = script_dir / 'figures'
     figures_dir.mkdir(exist_ok=True)
 
     # ── Files to compare ──────────────────────────────────────────────────────
     candidates = [  
-        data_dir / 'benchmark_N400_q999_2ms_3d_bound01.txt',
-        data_dir / 'benchmark_N400_q999_jacobian_biased_3d_bound01.txt',
-        data_dir / 'benchmark_N400_q999_jacobian_debiased_3d_bound01.txt',
+        data_dir / 'benchmark_results_onelevel_N400.txt',
+        data_dir / 'benchmark_results_N400_newseeds_comparison.txt',
+        data_dir / 'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add.txt',
     ]
     files = [f for f in candidates if f.is_file()]
 
@@ -384,5 +386,6 @@ if __name__ == '__main__':
 
     plot_shots_vs_fidelity(
         files,
+        output_file=figures_dir / 'fidelity_vs_shots_benchmarks_median_repo.png',
         labels=labels,
     )

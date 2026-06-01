@@ -101,6 +101,74 @@ FIGURES = [
 
 # ── Plotting ─────────────────────────────────────────────────────────────────
 
+def make_plane_figure(df, plane):
+    plane_df = df[df["plane"] == plane].copy()
+    fixed_vals = sorted(plane_df["slice_fixed_val"].unique())
+    q_cols = [col for col in ("Q_det", "Q_varMS") if col in plane_df.columns]
+    axes_for_plane = {
+        "XY": ("u1_fcl", "u2_fsb", r"$u_{f_{cl}}$", r"$u_{f_{sb}}$", r"$u_A$"),
+        "XZ": ("u1_fcl", "u3_A", r"$u_{f_{cl}}$", r"$u_A$", r"$u_{f_{sb}}$"),
+        "YZ": ("u2_fsb", "u3_A", r"$u_{f_{sb}}$", r"$u_A$", r"$u_{f_{cl}}$"),
+    }
+    x_col, y_col, x_label, y_label, fixed_label = axes_for_plane[plane]
+
+    fig, axes = plt.subplots(
+        len(q_cols), len(fixed_vals),
+        figsize=(4.4 * len(fixed_vals), 4.0 * len(q_cols)),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    fig.suptitle(f"Response surface plane {plane}", fontsize=13, fontweight="bold")
+
+    for row, q_col in enumerate(q_cols):
+        for col, fixed_val in enumerate(fixed_vals):
+            ax = axes[row, col]
+            sub = plane_df[np.abs(plane_df["slice_fixed_val"] - fixed_val) < EPS]
+            pivot = sub.pivot(index=y_col, columns=x_col, values=q_col)
+            x_vals = pivot.columns.values
+            y_vals = pivot.index.values
+            image = ax.imshow(
+                pivot.values,
+                origin="lower",
+                extent=[x_vals.min(), x_vals.max(), y_vals.min(), y_vals.max()],
+                aspect="auto",
+                cmap="viridis",
+                vmin=0.0,
+                vmax=1.0,
+            )
+            try:
+                cs = ax.contour(
+                    x_vals, y_vals, pivot.values,
+                    levels=[0.9, 0.99, 0.999],
+                    colors="white",
+                    linewidths=[0.7, 1.0, 1.5],
+                )
+                ax.clabel(cs, inline=True, fontsize=7, fmt="%.3g")
+            except ValueError:
+                pass
+            ax.set_title(f"{q_col}, {fixed_label}={fixed_val:+.1f}", fontsize=9)
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(y_label)
+            ax.grid(False)
+            fig.colorbar(image, ax=ax, shrink=0.82)
+
+    return fig
+
+
+def main_plane_schema(df):
+    os.makedirs(OUT_DIR, exist_ok=True)
+    planes = [plane for plane in ("XY", "XZ", "YZ") if plane in set(df["plane"])]
+    print("Detected plane-slice response-surface schema.")
+    for plane in planes:
+        print(f"[{plane}] response_surface_plane_{plane}.png ...")
+        fig = make_plane_figure(df, plane)
+        out = os.path.join(OUT_DIR, f"response_surface_plane_{plane}.png")
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"       saved → {out}")
+    print("Done.")
+
+
 def make_figure(df, cfg):
     slice_name = cfg["slice_name"]
     active     = cfg["active"]
@@ -180,6 +248,11 @@ def make_figure(df, cfg):
 def main():
     print(f"Loading {CSV_PATH} ...")
     df = pd.read_csv(CSV_PATH)
+    if {"plane", "slice_fixed_val", "u1_fcl", "u2_fsb", "u3_A"}.issubset(df.columns):
+        print(f"  {len(df):,} rows loaded. Planes: {sorted(df['plane'].unique())}")
+        main_plane_schema(df)
+        return
+
     print(f"  {len(df):,} rows loaded. Slices: {sorted(df['slice'].unique())}")
 
     os.makedirs(OUT_DIR, exist_ok=True)

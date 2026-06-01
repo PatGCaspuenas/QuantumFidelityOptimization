@@ -1,0 +1,3 @@
+label,n_trials,n_converged,mean_log10_opt_shots,std_log10_opt_shots,mean_log10_1_minus_qdet,std_log10_1_minus_qdet,mean_qdet,std_qdet,mean_score_det,std_score_det,mean_log10_1_minus_score,std_log10_1_minus_score,mean_iterations,std_iterations
+2ms_qvarms_baseline,40,37,3.77475284558,0.283652084905,-2.52150760363,0.558665610203,0.992139971694,0.0182531292821,NaN,NaN,NaN,NaN,36.075,28.6583656735
+full_l1_score_target,40,25,4.1095056868,0.286043355901,-1.95844348917,0.898469589991,0.914526654951,0.182654479582,0.893729083274,0.163693040642,-1.46821717166,0.69881405078,76.15,40.5548378347

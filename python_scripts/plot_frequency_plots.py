@@ -2,6 +2,8 @@ import glob
 import pandas as pd
 import numpy as np
 import seaborn as sns
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, LogNorm
 from scipy.ndimage import gaussian_filter
@@ -15,6 +17,10 @@ import colorsys
 n_bins   = 30    # histogram grid resolution
 sigma    = 1.2   # Gaussian smoothing sigma
 bg_color = 'white'
+trace_filter = os.environ.get('UCB_TRACE_FILTER', 'all').lower()
+density_mode = os.environ.get('UCB_DENSITY_MODE', 'point_count').lower()
+trace_glob = os.environ.get('UCB_TRACE_GLOB', 'data/traces/trace_seed*_ucb.csv')
+output_file = os.environ.get('UCB_FREQ_OUT', 'ucb_slices_heatmap_final.png')
 
 my_husl_blue = sns.husl_palette(n_colors=1, h=0.72, s=0.9, l=0.6)[0]
 def adjust_lightness(color, amount=0.5):
@@ -48,11 +54,27 @@ keys = ['x_rec', 'x_acq']
 clevels_base = np.linspace(0.1, 0.9, 5) 
 thick_level = [0.999]  
 
-# ── Pass 1: load data and compute per-run visit counts ───────────────────────
-ucb_files = glob.glob('data/traces/trace_seed*_ucb.csv')
+# ── Pass 1: load data and compute visit densities ────────────────────────────
+ucb_files = sorted(glob.glob(trace_glob))
 if not ucb_files:
-    print("No UCB trace files found.")
-dfs = [pd.read_csv(f) for f in ucb_files] if ucb_files else []
+    print(f"No UCB trace files found for glob: {trace_glob}")
+
+dfs = []
+used_files = []
+for f in ucb_files:
+    df = pd.read_csv(f)
+    stopped = bool(df['stopped_early'].iloc[-1]) if 'stopped_early' in df.columns else False
+    if trace_filter in ('nonconverged', 'non_converged', 'failed') and stopped:
+        continue
+    if trace_filter in ('converged', 'stopped') and not stopped:
+        continue
+    dfs.append(df)
+    used_files.append(f)
+
+if not dfs:
+    raise ValueError(f"No traces remain after UCB_TRACE_FILTER={trace_filter}")
+
+print(f"Using {len(dfs)} traces with filter={trace_filter}, density_mode={density_mode}")
 n_runs = max(len(dfs), 1)
 
 edges = np.linspace(-1, 1, n_bins + 1)
@@ -71,15 +93,22 @@ for col_idx, s_conf in enumerate(slices_config):
         for df in dfs:
             pts_x = df[f'{key}_{x_axis}'].values[n_initial:]
             pts_y = df[f'{key}_{y_axis}'].values[n_initial:]
+            good = np.isfinite(pts_x) & np.isfinite(pts_y)
+            pts_x = pts_x[good]
+            pts_y = pts_y[good]
             H_r, _, _ = np.histogram2d(pts_x, pts_y, bins=[edges, edges])
-            H_runs += (H_r > 0).astype(float)
+            if density_mode in ('run_visit', 'per_run', 'binary'):
+                H_runs += (H_r > 0).astype(float)
+            else:
+                H_runs += H_r
             
         H_smooth = gaussian_filter(H_runs.T.astype(float), sigma=sigma)
         all_densities[key][col_idx] = H_smooth
 
 # ── Pass 2: plot ─────────────────────────────────────────────────────────────
 vmin_counts = 1.0
-vmax_counts = max(100.0, float(n_runs))
+max_density = max(float(np.nanmax(H)) for values in all_densities.values() for H in values if H is not None)
+vmax_counts = max(1.0, max_density)
 shared_norm = LogNorm(vmin=vmin_counts, vmax=vmax_counts)
 
 fig, axes = plt.subplots(2, 3, subplot_kw=dict(box_aspect=1),
@@ -157,11 +186,15 @@ gray_cmap.set_under(bg_color)
 sm = plt.cm.ScalarMappable(cmap=gray_cmap, norm=shared_norm)
 sm.set_array([])
 
+ticks = [1, 10, 100] if vmax_counts >= 100 else ([1, 10] if vmax_counts >= 10 else [1])
 cb = fig.colorbar(sm, ax=axes, location='bottom', shrink=0.35, aspect=30, pad=0.04,
-                  ticks=[1, 10, 100])
-cb.ax.set_xticklabels(['0.01', '0.1', '1']) 
-cb.set_label('Sampling Frequency', rotation=0, labelpad=5, fontsize=12)
+                  ticks=ticks)
+if density_mode in ('run_visit', 'per_run', 'binary'):
+    cb.set_label('Number of seeds visiting bin', rotation=0, labelpad=5, fontsize=12)
+else:
+    cb.set_label('Chosen-parameter count', rotation=0, labelpad=5, fontsize=12)
 cb.ax.tick_params(labelsize=12)
 
-fig.savefig('ucb_slices_heatmap_final.png', bbox_inches='tight', dpi=300)
+fig.savefig(output_file, bbox_inches='tight', dpi=300)
+print(f"Saved {output_file}")
 plt.show()

@@ -148,6 +148,7 @@ def extract_shots_and_fidelity(filepath, max_iterations=120):
 
         if itr == max_iterations:
             n_unconverged += 1
+            continue
 
         lx = None
         if total_shots_col is not None and len(parts) > total_shots_col:
@@ -333,7 +334,9 @@ def plot_versions(n_pairs, version_labels=('Version 1', 'Version 2', 'Version 3'
 
 if __name__ == '__main__':
     script_dir  = Path(__file__).parent
-    data_dir    = script_dir / 'data' / 'input_dim'
+    repo_root   = script_dir.parent
+    script_data = repo_root / 'scripts' / 'data'
+    data_dir    = repo_root / 'data'
     figures_dir = script_dir / 'figures'
     figures_dir.mkdir(exist_ok=True)
 
@@ -341,35 +344,35 @@ if __name__ == '__main__':
     # Example below sets up 3 files per pair
     n_pairs = [
         dict(N=50, files=[
-            data_dir / 'benchmark_N50_q999_2ms_3d_stop_mu_one_check.txt',
-            data_dir / 'benchmark_N50_q999_2ms_4d_stop_mu_one_check.txt',
+            script_data / 'benchmark_fixedN50.txt',
+            data_dir / 'benchmark_results_N50_linear_binomial_LFBGS_Ncheck2_add.txt',
         ]),
         dict(N=100, files=[
-            data_dir / 'benchmark_N100_q999_2ms_3d_stop_mu_one_check.txt',
-            data_dir / 'benchmark_N100_q999_2ms_4d_stop_mu_one_check.txt',
+            script_data / 'benchmark_fixedN100.txt',
+            data_dir / 'benchmark_results_N100_linear_binomial_LFBGS_Ncheck2_add.txt',
         ]),
         dict(N=250, files=[
-            data_dir / 'benchmark_N250_q999_2ms_3d_stop_mu_one_check.txt',
-            data_dir / 'benchmark_N250_q999_2ms_4d_stop_mu_one_check.txt',
+            script_data / 'benchmark_fixedN250.txt',
+            data_dir / 'benchmark_results_N250_linear_binomial_LFBGS_Ncheck2_add.txt',
         ]),
         dict(N=400, files=[
-            data_dir / 'benchmark_N400_q999_2ms_3d_stop_mu_one_check.txt',
-            data_dir / 'benchmark_N400_q999_2ms_4d_stop_mu_one_check.txt',
+            data_dir / 'benchmark_results_onelevel_N400.txt',
+            data_dir / 'benchmark_results_N400_linear_binomial_LFBGS_Ncheck2_add.txt',
         ]),
 
         dict(N=1000, files=[
-            data_dir / 'benchmark_N1000_q999_2ms_3d_stop_mu_one_check.txt',
-            data_dir / 'benchmark_N1000_q999_2ms_4d_stop_mu_one_check.txt',
+            script_data / 'benchmark_fixedN1000.txt',
         ]),
         dict(N=2500, files=[
-            data_dir / 'benchmark_N2500_q999_2ms_3d_stop_lcb.txt',
-            data_dir / 'benchmark_N2500_q999_2ms_3d_stop_mu_one_check.txt',
-            data_dir / 'benchmark_N2500_q999_2ms_3d_stop_two_checks.txt',
+            script_data / 'benchmark_fixedN2500.txt',
+            data_dir / 'benchmark_results_N2500_linear_binomial_LFBGS_Ncheck2_add.txt',
+            script_data / 'adaptive_kappa_2ms_40_start070_N2500.txt',
         ]),
     ]
 
     plot_versions(
         n_pairs,
-        version_labels=('3D', '4D'), # Define labels for your 3 cases here
-        markers=('o', '^', 's')                  # o = circle, ^ = triangle, s = square
+        version_labels=('current static', 'legacy benchmark', 'adaptive kappa'),
+        markers=('o', '^', 's'),
+        output_file=figures_dir / 'fidelity_vs_shots_curves_median_repo.png',
     )

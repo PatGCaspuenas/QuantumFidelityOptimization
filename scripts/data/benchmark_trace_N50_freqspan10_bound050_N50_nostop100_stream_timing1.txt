@@ -1,0 +1,63 @@
+=== TRACE BENCHMARK RESULTS ===
+N_shots = 50
+n_init = 12
+n_iter = 100
+num_sims = 1
+workers = 5
+threshold = 1.0
+disable_stopping = true
+require_surrogate_confidence = true
+stopping_rule = surrogate_then_noisy
+score_mode = odd_penalty
+confidence_z = 0.98
+restart_on_stagnation = true
+restart_failure_window = 8
+restart_min_active_iter = 16
+restart_min_delta = 0.01
+restart_disable_lcb = 0.8
+restart_max_restarts = 5
+restart_seed_policy = reset_local_bo_rng_and_worker_global_rng
+kappa = 1.9
+path_guard = false
+path_guard_init_design = latin_hypercube
+path_guard_init_center_exclusion = 0.0
+path_guard_init_sobol_skip_max = 2048
+decision_q_max = 1.0
+path_guard_trust_start_q = 0.7
+path_guard_strong_trust_q = 0.9
+path_guard_global_scout_period = 7
+path_guard_global_scout_frac = 0.15
+center_jitter_u_max = 0.0
+bound_scale = 0.5
+freq_span_mode = raw_khz
+freq_span_raw_kHz = 10.0
+freq_span_2pi_kHz = 1.5915494309189535
+fixed_init_seed = 0
+gp_diag = false
+gp_diag_dir = /Users/caleb/Documents/SQRL/Calibration/QuantumFidelityOptimization/data/gp_diagnostics_freqspan10_bound050_N50_nostop100_stream_timing1
+gp_diag_grid_n = 101
+gp_diag_snapshot_iters = 10,50,100
+gp_diag_snapshot_axes = fcl,fsb,amp
+gp_diag_every_iter_axes = fcl
+stream_seed_outputs = true
+seed_progress_csv = /Users/caleb/Documents/SQRL/Calibration/QuantumFidelityOptimization/data/traces_freqspan10_bound050_N50_nostop100_stream_timing1/seed_progress.csv
+M_acq = 5000
+M_rec = 20000
+elapsed_seconds = 351.39694690704346
+
+=== RESULTS SUMMARY ===
+Early stops = 0 / 1
+Average Q_det = 0.9986336659764546 +/- 0.0
+Median Q_det = 0.9986336659764546
+Min Q_det = 0.9986336659764546
+Max Q_det = 0.9986336659764546
+Average log10(1-Q_det) = -2.8644431170165805 +/- 0.0
+Average iterations = 100.0 +/- 0.0
+Average total shots = 5650.0
+Total restarts = 0
+Average restarts = 0.0 +/- 0.0
+Average seed elapsed seconds = 344.3022291660309 +/- 0.0
+
+=== All Results ===
+Sim	Seed	InitialSeed	Iterations	StoppedEarly	Restarts	RestartSeeds	TotalShots	NTrain	Q_det	Q_rec	Q_last	center_jitter_u1	center_jitter_u2	center_jitter_u3	true_opt_u1	true_opt_u2	true_opt_u3	ell1	ell2	ell3	sigma_f	c	ElapsedSeconds
+1	714078	714078	100	false	0		5650	112	0.99863366597645464	0.95999999999999996	1	0	0	0	-0	-0	-0	0.42890167450081484	0.23673698944847552	1.5	1.4821065836747522	1.0179706527036454	344.30222916603088

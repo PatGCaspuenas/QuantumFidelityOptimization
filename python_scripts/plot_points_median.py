@@ -1,6 +1,8 @@
 import glob
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import matplotlib.colors as mc
@@ -51,25 +53,39 @@ edge_color = adjust_lightness(my_husl_blue, 0.6)
 
 c_start, c_end = "#ADD8E6", color_main 
 
-# True Max Coordinates (Normalized [-1, 1])
-# IMPORTANT: Update these with the actual true max location!
+# True Max Coordinates in the plotted contour frame.
+# Jittered runs shift the simulated optimum internally, but these plots keep
+# the marker at the contour center so the background landscape stays readable.
 true_max = {'u1': 0.0, 'u2': 0.0, 'u3': 0.0}
 
-# ── 1. Find Median Seed ──────────────────────────────────────────────────────
-ucb_files = glob.glob('data/traces/trace_seed*_ucb.csv')
+# ── 1. Select Seed ───────────────────────────────────────────────────────────
+trace_glob = os.environ.get('UCB_TRACE_GLOB', 'data/traces/trace_seed*_ucb.csv')
+ucb_files = sorted(glob.glob(trace_glob))
 if not ucb_files:
-    raise ValueError("No UCB files found!")
-    
-dfs = [pd.read_csv(f) for f in ucb_files]
+    raise ValueError(f"No UCB files found for glob: {trace_glob}")
 
-final_m_rec = [df['m_rec'].iloc[-1] for df in dfs]
-median_val = np.nanmedian(final_m_rec)
-median_idx = np.nanargmin(np.abs(np.array(final_m_rec) - median_val))
-df_median = dfs[median_idx]
+selected_seed = os.environ.get('UCB_TRACE_SEED')
+if selected_seed:
+    matches = [f for f in ucb_files if f'trace_seed{selected_seed}_ucb.csv' in f]
+    if not matches:
+        raise ValueError(f"No UCB trace file found for seed {selected_seed}")
+    selected_file = matches[0]
+    df_selected = pd.read_csv(selected_file)
+    output_file = os.environ.get('UCB_POINTS_OUT', f'ucb_seed{selected_seed}_points_aligned.png')
+    print(f"Selected seed {selected_seed}: {selected_file}")
+else:
+    dfs = [pd.read_csv(f) for f in ucb_files]
+    final_m_rec = [df['m_rec'].iloc[-1] for df in dfs]
+    median_val = np.nanmedian(final_m_rec)
+    median_idx = np.nanargmin(np.abs(np.array(final_m_rec) - median_val))
+    selected_file = ucb_files[median_idx]
+    df_selected = dfs[median_idx]
+    output_file = os.environ.get('UCB_POINTS_OUT', 'ucb_median_points_aligned.png')
+    print(f"Selected median final m_rec trace: {selected_file}")
 
 n_initial = 1
-df_median = df_median.iloc[n_initial:].dropna(subset=['x_rec_u1', 'x_acq_u1']).copy()
-n_points = len(df_median)
+df_selected = df_selected.iloc[n_initial:].dropna(subset=['x_rec_u1', 'x_acq_u1']).copy()
+n_points = len(df_selected)
 colors = create_color_list(c_start, c_end, n_colors=n_points)
 
 # ── 2. Plotting ──────────────────────────────────────────────────────────────
@@ -129,8 +145,8 @@ for i, (key, row_label) in enumerate(zip(keys, row_labels)):
             axins_list.append(axins)
             
         # ── Extract and Plot Points ──
-        pts_x = df_median[f'{key}_{x_col}'].values
-        pts_y = df_median[f'{key}_{y_col}'].values
+        pts_x = df_selected[f'{key}_{x_col}'].values
+        pts_y = df_selected[f'{key}_{y_col}'].values
         
         for k in range(n_points):
             if i == 0: 
@@ -192,11 +208,13 @@ legend_element_2 = Line2D([0], [0], marker='*', color='w', label='Last Estimated
                           markerfacecolor='red', markeredgecolor=edge_color, markersize=12, markeredgewidth=1.2)
 
 cmap = LinearSegmentedColormap.from_list("custom_cbar", [c_start, c_end])
-mnorm = mpl.colors.Normalize(vmin=0, vmax=50)
+colorbar_max = max(50, n_points)
+mnorm = mpl.colors.Normalize(vmin=0, vmax=colorbar_max)
 sm = plt.cm.ScalarMappable(cmap=cmap, norm=mnorm)
 sm.set_array([])
 
-cb = fig.colorbar(sm, ax=axes, location='bottom', shrink=0.35, aspect=30, pad=0.05, ticks=[0, 25, 50])
+cb_ticks = [0, colorbar_max / 2, colorbar_max]
+cb = fig.colorbar(sm, ax=axes, location='bottom', shrink=0.35, aspect=30, pad=0.05, ticks=cb_ticks)
 cb.ax.set_title('Iteration ($n$)', fontsize=12, pad=10)
 cb.ax.tick_params(labelsize=12)
 
@@ -207,5 +225,6 @@ cb.ax.add_artist(leg1) # Required so the second legend doesn't overwrite the fir
 # 3. Anchor the second legend to the right side of the colorbar (x = 1.08)
 cb.ax.legend(handles=[legend_element_2], loc='center left', bbox_to_anchor=(1.08, 0.5), fontsize=12, frameon=False)
 
-fig.savefig('ucb_median_points_aligned.png', bbox_inches='tight', dpi=300)
+fig.savefig(output_file, bbox_inches='tight', dpi=300)
+print(f"Saved {output_file}")
 plt.show()
