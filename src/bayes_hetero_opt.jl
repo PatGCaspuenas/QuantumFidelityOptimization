@@ -194,6 +194,29 @@ function predict_latent(gp::HeteroGP, x::Vector{Float64})
 end
 
 # BO structures + utilities
+struct RestartConfig
+    enabled::Bool
+    failure_window::Int
+    min_active_iter::Int
+    min_delta::Float64
+    disable_lcb::Float64
+    max_restarts::Int
+    confidence_z::Float64
+    count_init_in_budget::Bool
+end
+
+RestartConfig(;
+    enabled=false,
+    failure_window=14,
+    min_active_iter=20,
+    min_delta=0.02,
+    disable_lcb=0.85,
+    max_restarts=3,
+    confidence_z=1.0,
+    count_init_in_budget=false,
+) = RestartConfig(enabled, failure_window, min_active_iter, min_delta,
+                  disable_lcb, max_restarts, confidence_z, count_init_in_budget)
+
 struct HeteroBOResult
     X::Matrix{Float64}          # d × n_total  — all evaluated points
     y::Vector{Float64}          # n_total       — measured values (original space)
@@ -203,10 +226,12 @@ struct HeteroBOResult
     X_opt::Matrix{Float64}      # d × n_iter_actual  — GP-recommended points at each iteration
     mu_opt::Vector{Float64}     # n_iter_actual       — GP posterior mean at the recommended points (original space)
     y_last_opt::Float64         # final recommended point's measured value (original space)
-    σy_opt::Float64                # final recommended point's noise estimate
+    σy_opt::Float64             # final recommended point's noise estimate
     n_iter_actual::Int
-    θ_i::Matrix{Float64}         # (d+2) × n_iter_actual  — GP hyperparameters at each iteration
+    θ_i::Matrix{Float64}        # (d+2) × n_iter_actual  — GP hyperparameters at each iteration
     total_shots::Int
+    n_restarts::Int
+    restart_seeds::Vector{Int}
 end
 
 @inline function _validate_bounds(bounds)
@@ -229,10 +254,38 @@ end
     return true
 end
 
-@inline function _call_f_raw(f, x::Vector{Float64}, n::Int)
-    result = f(x, n)
+"""
+    score_from_probs(p00, p01, p10, p11, N, mode) -> (y, σ)
+
+Convert population probabilities to a calibration score and binomial noise estimate.
+
+`mode`:
+  - `:p11` — score = P(|11⟩) (legacy behaviour)
+  - `:full_l1` — score = 1 - 0.5·(|p00| + |p01| + |p10| + |p11 - 1|)
+"""
+@inline function score_from_probs(p00::Float64, p01::Float64, p10::Float64, p11::Float64,
+                                  N::Real, mode::Symbol)
+    if mode === :full_l1
+        l1 = abs(p00) + abs(p01) + abs(p10) + abs(p11 - 1.0)
+        y  = clamp(1.0 - 0.5 * l1, 0.0, 1.0)
+    elseif mode === :p11
+        y = clamp(p11, 0.0, 1.0)
+    else
+        throw(ArgumentError("score_mode must be :p11 or :full_l1, got $mode"))
+    end
+    var_one = p11 * (1.0 - p11)
+    σ = isinf(Float64(N)) ? 0.0 : sqrt(max(var_one, 0.0) / Float64(N))
+    return y, σ
+end
+
+@inline function _call_score(f, x::Vector{Float64}, n::Int, mode::Symbol)
+    probs = f(x, n)
     # PythonCall returns Py objects from Python callbacks — use pyconvert + 0-based indexing
-    return pyconvert(Float64, result[0]), pyconvert(Float64, result[1])
+    p00 = pyconvert(Float64, probs[0])
+    p01 = pyconvert(Float64, probs[1])
+    p10 = pyconvert(Float64, probs[2])
+    p11 = pyconvert(Float64, probs[3])
+    return score_from_probs(p00, p01, p10, p11, n, mode)
 end
 
 @inline function _rand_in_box(rng::Random.AbstractRNG, lb::Vector{Float64}, ub::Vector{Float64})
@@ -244,6 +297,32 @@ end
 end
 
 @inline ucb_score(μ::Float64, s2::Float64, κ::Float64) = μ + κ * sqrt(max(s2, 0.0))
+
+"""
+    _fill_initial_design!(f, X, y, σy, rng, lb, ub, n_init, n_shots, score_mode, maximize)
+
+Fill the first `n_init` columns of the training set with random box samples.
+Returns `(write_idx, shots_spent, i_acq_list)`.
+"""
+function _fill_initial_design!(f, X::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float64},
+                                 rng::Random.AbstractRNG,
+                                 lb::Vector{Float64}, ub::Vector{Float64},
+                                 n_init::Int, n_shots::Int, score_mode::Symbol, maximize::Bool)
+    write_idx = 0
+    shots = 0
+    i_acq_list = Int[]
+    for _ in 1:n_init
+        x = _rand_in_box(rng, lb, ub)
+        y_raw, σy_i = _call_score(f, x, n_shots, score_mode)
+        shots += n_shots
+        write_idx += 1
+        X[:, write_idx] = x
+        y[write_idx]  = maximize ? y_raw : -y_raw
+        σy[write_idx] = σy_i
+        push!(i_acq_list, write_idx)
+    end
+    return write_idx, shots, i_acq_list
+end
 
 """
     recommend_mean(gp, bounds; M, rng) -> (x_rec, m_rec, s_rec)
@@ -281,6 +360,13 @@ Heteroscedastic BO with GP-UCB acquisition (random scan) and Matérn 3/2 ARD ker
 Stopping: at each iteration the GP posterior mean at the recommended point is
 checked against `fidelity_threshold` (mu_one_check). If it exceeds the threshold
 the run stops early without spending additional shots.
+
+Restart: when `restart_config.enabled`, monitors the GP lower confidence bound
+`m_rec - confidence_z * s_rec` at the recommended point. If it fails to improve
+by `min_delta` for `failure_window` consecutive active iterations (after
+`min_active_iter` since the last restart), the training set is cleared and
+refilled with a fresh random initial design under a new RNG seed (up to
+`max_restarts` times). If LCB ≥ `disable_lcb`, the failure counter resets.
 """
 function bayesopt_ucb_threshold(f;
                                bounds::Vector{Tuple{Float64,Float64}},
@@ -297,13 +383,19 @@ function bayesopt_ucb_threshold(f;
                                verbose::Bool=false,
                                fidelity_threshold::Union{Nothing,Float64}=nothing,
                                learn_noise_scale::Bool=true,
-                               n_restarts::Int=6)
+                               n_restarts::Int=6,
+                               score_mode::Symbol=:p11,
+                               jitter::Float64=1e-8,
+                               restart_config::RestartConfig=RestartConfig())
 
     _validate_bounds(bounds)
     n_init ≥ 1  || throw(ArgumentError("n_init must be ≥ 1"))
     n_iter ≥ 0  || throw(ArgumentError("n_iter must be ≥ 0"))
     κ ≥ 0       || throw(ArgumentError("κ must be ≥ 0"))
     n_shots ≥ 1 || throw(ArgumentError("n_shots must be ≥ 1"))
+    score_mode in (:p11, :full_l1) ||
+        throw(ArgumentError("score_mode must be :p11 or :full_l1, got $score_mode"))
+    jitter > 0 || throw(ArgumentError("jitter must be > 0"))
 
     rng_local = seed === nothing ? rng : MersenneTwister(seed)
 
@@ -314,44 +406,50 @@ function bayesopt_ucb_threshold(f;
     # n_init + one UCB + one opt-check per iteration + 1 final recommendation
     n_cap = n_init + 2 * n_iter + 1
     X  = Matrix{Float64}(undef, d, n_cap)
-    y  = Vector{Float64}(undef, n_cap)   # stored sign-flipped internally; un-flipped on return
+    y  = Vector{Float64}(undef, n_cap)
     σy = Vector{Float64}(undef, n_cap)
 
     X_opt = Matrix{Float64}(undef, d, n_cap)
     mu_opt = Vector{Float64}(undef, n_cap)
 
-    θ_i =  Matrix{Float64}(undef, d + 2, n_cap)
+    θ_i = Matrix{Float64}(undef, d + 2, n_cap)
 
     write_idx         = 0
     total_shots_count = 0
     i_acq_list = Int[]
-    i_opt_list  = Int[]
+    i_opt_list = Int[]
 
-    # init: random exploration
-    for _ in 1:n_init
-        x = _rand_in_box(rng_local, lb, ub)
-        y_raw, σy_i = _call_f_raw(f, x, n_shots)
-        total_shots_count += n_shots
-        write_idx += 1
-        X[:, write_idx] = x
-        y[write_idx]    = maximize ? y_raw : -y_raw
-        σy[write_idx]   = σy_i
-        push!(i_acq_list, write_idx)
-    end
+    write_idx, init_shots, i_acq_list =
+        _fill_initial_design!(f, X, y, σy, rng_local, lb, ub,
+                              n_init, n_shots, score_mode, maximize)
+    total_shots_count += init_shots
 
     θ_prev        = nothing
     n_iter_actual = n_iter
-    x_opt         = _rand_in_box(rng_local, lb, ub)  # initialised so it's defined if n_iter==0
+    x_opt         = _rand_in_box(rng_local, lb, ub)
     m_opt         = -Inf
+    stopped_early = false
+
+    restart_count         = 0
+    restart_seeds         = Int[]
+    restart_start_iter    = 1
+    restart_failure_count = 0
+    restart_best_signal   = -Inf
+    restart_init_iter_cost = 0
 
     for it in 1:n_iter
+        budget_it = it + restart_init_iter_cost
+        if restart_config.count_init_in_budget && budget_it > n_iter
+            break
+        end
+
         do_opt = (it == 1) || (hyper_every > 0 && it % hyper_every == 0)
         gp = fit_heterogp(X[:, 1:write_idx], y[1:write_idx], σy[1:write_idx];
                           θ_init=θ_prev,
                           learn_hypers=do_opt,
                           learn_noise_scale=learn_noise_scale,
                           n_restarts=do_opt ? n_restarts : 0,
-                          jitter=1e-8,
+                          jitter=jitter,
                           rng=rng_local)
         θ_prev = gp.θ
         θ_i[:, it] = θ_prev
@@ -370,7 +468,7 @@ function bayesopt_ucb_threshold(f;
             end
         end
 
-        y_raw, σy_i = _call_f_raw(f, best_x, n_shots)
+        y_raw, σy_i = _call_score(f, best_x, n_shots, score_mode)
         total_shots_count += n_shots
         if _is_far_enough(best_x, X, write_idx)
             write_idx += 1
@@ -380,16 +478,39 @@ function bayesopt_ucb_threshold(f;
             push!(i_acq_list, write_idx)
         end
         verbose && @info "it=$it best_acq=$best_a"
-        
-        x_opt, m_opt, _ = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+
+        x_opt, m_opt, s_rec = recommend_mean(gp, bounds; M=M_rec, rng=rng_local)
+        m_rec = maximize ? m_opt : -m_opt
+        m_rec_lcb = m_rec - restart_config.confidence_z * s_rec
         X_opt[:, it] = x_opt
-        mu_opt[it]    = maximize ? m_opt : -m_opt
+        mu_opt[it]   = m_rec
+
+        # Restart on stagnation of GP lower confidence bound at x*
+        restart_triggered = false
+        restart_seed = 0
+        active_iter = it - restart_start_iter + 1
+        if restart_config.enabled && !stopped_early &&
+           restart_count < restart_config.max_restarts &&
+           active_iter >= restart_config.min_active_iter
+            if m_rec_lcb >= restart_config.disable_lcb
+                restart_failure_count = 0
+            elseif m_rec_lcb > restart_best_signal + restart_config.min_delta
+                restart_best_signal = m_rec_lcb
+                restart_failure_count = 0
+            else
+                restart_failure_count += 1
+                if restart_failure_count >= restart_config.failure_window
+                    restart_count += 1
+                    restart_triggered = true
+                    restart_seed = rand(rng_local, 1:typemax(Int32))
+                end
+            end
+        end
 
         # mu_one_check: GPR mean ≥ threshold → confirm with a real sample
         if fidelity_threshold !== nothing
-            
-            if m_opt >= fidelity_threshold
-                y_opt, σy_opt = _call_f_raw(f, x_opt, n_shots)
+            if m_rec >= fidelity_threshold
+                y_opt, σy_opt = _call_score(f, x_opt, n_shots, score_mode)
                 total_shots_count += n_shots
                 if _is_far_enough(x_opt, X, write_idx)
                     write_idx += 1
@@ -398,20 +519,40 @@ function bayesopt_ucb_threshold(f;
                     σy[write_idx]   = σy_opt
                     push!(i_opt_list, write_idx)
                 end
-                y_last_opt     = maximize ? y_opt : -y_opt
+                y_last_opt = maximize ? y_opt : -y_opt
                 if y_last_opt >= fidelity_threshold
+                    stopped_early = true
                     n_iter_actual = it
                     y_out = maximize ? y[1:write_idx] : -y[1:write_idx]
                     return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
                                           i_acq_list, i_opt_list,
                                           X_opt[:, 1:it], mu_opt[1:it], y_last_opt, σy_opt,
-                                          n_iter_actual, θ_i, total_shots_count)
+                                          n_iter_actual, θ_i[:, 1:it],
+                                          total_shots_count, restart_count, restart_seeds)
                 end
             end
         end
+
+        if restart_triggered
+            push!(restart_seeds, restart_seed)
+            rng_local = MersenneTwister(restart_seed)
+            write_idx, restart_shots, i_acq_list =
+                _fill_initial_design!(f, X, y, σy, rng_local, lb, ub,
+                                      n_init, n_shots, score_mode, maximize)
+            total_shots_count += restart_shots
+            if restart_config.count_init_in_budget
+                restart_init_iter_cost += n_init
+            end
+            i_opt_list = Int[]
+            θ_prev = nothing
+            restart_start_iter = it + 1
+            restart_failure_count = 0
+            restart_best_signal = -Inf
+            verbose && @info "restart=$restart_count seed=$restart_seed at it=$it lcb=$m_rec_lcb"
+        end
     end
 
-    y_opt, σy_opt = _call_f_raw(f, x_opt, n_shots)
+    y_opt, σy_opt = _call_score(f, x_opt, n_shots, score_mode)
     total_shots_count += n_shots
     if _is_far_enough(x_opt, X, write_idx)
         write_idx += 1
@@ -427,5 +568,6 @@ function bayesopt_ucb_threshold(f;
     return HeteroBOResult(X[:, 1:write_idx], y_out, σy[1:write_idx],
                           i_acq_list, i_opt_list,
                           X_opt[:, 1:n_iter], mu_opt[1:n_iter], y_last_opt, σy_opt,
-                          n_iter_actual, θ_i, total_shots_count)
+                          n_iter_actual, θ_i[:, 1:n_iter],
+                          total_shots_count, restart_count, restart_seeds)
 end
