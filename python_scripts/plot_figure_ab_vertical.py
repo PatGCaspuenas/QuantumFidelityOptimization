@@ -24,23 +24,23 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # APS Plot Formatting (PRX Intelligence / PR Applied)
 # ---------------------------------------------------------------------------
-# Double column width is typically ~6.75 inches.
+# Single column width: 3.375 inches.
 mpl.rcParams.update({
-    "figure.figsize": (6.75, 8.0),   # Double-column width, proportional height
-    "font.family": "serif",          # Fallback to serif
-    "mathtext.fontset": "cm",        # Computer Modern for math
-    "font.size": 12,                 # Base size 12
+    "figure.figsize": (3.375, 6.0),  
+    "font.family": "serif",          
+    "mathtext.fontset": "cm",        
+    "font.size": 12,                 
     "axes.labelsize": 12,
     "xtick.labelsize": 12,
     "ytick.labelsize": 12,
-    "legend.fontsize": 10,           # Legend size 10
-    "lines.linewidth": 1.5,          # Line width 1.5
+    "legend.fontsize": 10,           
+    "lines.linewidth": 1.5,          
 })
 
 plt.rcParams.update({
     "text.usetex": True,
     "text.latex.preamble": r"\usepackage{amsmath}\usepackage{bm}",
-    "backend": "pdf",   # use pdf backend — avoids dvipng, uses pdflatex directly
+    "backend": "pdf",   
 })
 
 # ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ FIGURE_DIR = REPO_ROOT
 # ---------------------------------------------------------------------------
 MAX_ITER = 100
 TRACE_INFLOOR = 1e-10
-SCALE_INFLOOR = 1e-5
+SCALE_INFLOOR = 1e-10  
 SELECTED_Y_FLOOR = 1e-7
 SCALE_DROP_FAILURES = True
 SCALE_FAILURE_Q_THRESHOLD = 0.99
@@ -66,34 +66,37 @@ MODEL_DASH_A = 0.00891668
 MODEL_DASH_ALPHA = 0.4947
 
 # Palettes
-flare_colors = sns.color_palette("flare", n_colors=3).as_hex()
-husl_colors = sns.color_palette("husl", n_colors=4).as_hex()
+# Generate 8 colors from magma to access distinct adjacent dark shades
+magma_colors = sns.color_palette("magma", n_colors=8).as_hex()
 
 SCALE_GROUPS = [
     {
-        "label": "scale = 0.1",
-        "color": flare_colors[0],
-        "dir": DATA_DIR / "traces_freqspan10_bound010_NInf_lhs12_restart_fullbudget_40seeds",
+        "label": r"$r$ = 0.1",
+        "color": "#010152",  # Very dark purple (similar to 0, but distinct)
+        "ls": ":",                 
+        "dir": DATA_DIR / "traces_freqspan10_bound010_NInf_lhs12_restart_fullbudget100_100seeds",
     },
     {
-        "label": "scale = 0.5",
-        "color": flare_colors[1],
-        "dir": DATA_DIR / "traces_freqspan10_bound050_NInf_lhs12_restart_fullbudget100_40seeds",
+        "label": r"$r$ = 0.5",
+        "color": magma_colors[0],  # Absolute darkest (Matches N=Inf exactly)
+        "ls": "-",                
+        "dir": DATA_DIR / "traces_freqspan10_bound050_NInf_lhs12_restart_fullbudget100_100seeds",
     },
     {
-        "label": "scale = 1.0",
-        "color": flare_colors[2],
-        "dir": DATA_DIR / "traces_freqspan10_bound100_NInf_lhs12_restart_fullbudget100_40seeds",
+        "label": r"$r$ = 1.0",
+        "color": "#000000",  # Dark purple (similar to 0, but distinct)
+        "ls": "--",                 
+        "dir": DATA_DIR / "traces_freqspan10_bound100_NInf_lhs12_restart_fullbudget100_100seeds",
     },
 ]
 
 N_LABELS = ["100", "1000", "10000", "100000", "Inf"]
 N_COLORS = {
-    "100":    husl_colors[0],
-    "1000":   husl_colors[1],
-    "10000":  husl_colors[2],
-    "100000": husl_colors[3],
-    "Inf":    "#000000",  # Black for deterministic
+    "100":    magma_colors[6], # Orange
+    "1000":   magma_colors[5], # Pink/Orange
+    "10000":  magma_colors[4], # Magenta/Purple
+    "100000": magma_colors[3], # Medium-dark Purple
+    "Inf":    magma_colors[0], # Absolute darkest
 }
 N_LEGENDS = {
     "100":    r"$N = 10^2$",
@@ -148,7 +151,7 @@ def trace_matrix(traces, floor: float = TRACE_INFLOOR) -> np.ndarray:
     return np.vstack([forward_fill_infid(t, floor=floor) for t in traces])
 
 def full_l1_trace_dir(n_label: str) -> Path:
-    return DATA_DIR / f"traces_freqspan10_bound050_full_l1_N{n_label}_nostop100_stream_40seeds"
+    return DATA_DIR / f"traces_freqspan10_bound050_full_l1_N{n_label}_nostop100_stream_100seeds"
 
 def model_dash_infid(n_label: str) -> float:
     return MODEL_DASH_EPS_INF + MODEL_DASH_A * float(n_label) ** (-MODEL_DASH_ALPHA)
@@ -161,10 +164,7 @@ def quantile_rows(matrix: np.ndarray, q: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _fuzzy_gradient_fill(ax, xs, mat, color, zorder=2, smooth_sigma=None):
-    """Layered quantile shading.
-    smooth_sigma=None  → raw empirical quantiles (no smoothing)
-    smooth_sigma=N     → Gaussian-smoothed bands (sigma=N iterations)
-    """
+    """Layered quantile shading."""
     n_layers   = 50
     quantiles  = np.linspace(0.05, 0.45, n_layers)
     base_alpha = 0.5 / n_layers
@@ -177,26 +177,31 @@ def _fuzzy_gradient_fill(ax, xs, mat, color, zorder=2, smooth_sigma=None):
         ax.fill_between(xs, lower, upper, color=color, alpha=base_alpha,
                         linewidth=0, edgecolor="none", zorder=zorder)
 
-def style_log_axis(ax, y_floor: float):
-    min_exp = int(np.floor(np.log10(y_floor)))
-    exponents = list(range(0, min_exp - 1, -1))
-    yticks = [10.0 ** e for e in exponents]
-    ylabels = [f"$10^{{{e}}}$" for e in exponents]
+def style_log_axis(ax):
+    ax.set_xlim(0, MAX_ITER)
+    ax.set_ylim(1e-7, 1.0)
+    ax.set_yscale("log")
     
-    ax.set_yticks(yticks)
-    ax.set_yticklabels(ylabels)
     ax.set_xticks([0, 20, 40, 60, 80, 100])
     ax.set_xticklabels(["0", "20", "40", "60", "80", "100"])
     
+    # Setup Locators for major and minor ticks to ensure all exist
+    locmaj = ticker.LogLocator(base=10.0, numticks=15)
+    ax.yaxis.set_major_locator(locmaj)
+    locmin = ticker.LogLocator(base=10.0, subs=np.arange(2, 10) * .1, numticks=100)
+    ax.yaxis.set_minor_locator(locmin)
+    
+    # Custom formatter to only print labels for desired specific exponents
+    def custom_fmt(x, pos):
+        if x > 0:
+            exp = int(np.round(np.log10(x)))
+            if exp in [0, -2, -4, -6]:
+                return f"$10^{{{exp}}}$"
+        return ""
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(custom_fmt))
+    
     # Inward ticks for both major and minor
     ax.tick_params(which="both", direction="in", top=True, right=True)
-    
-    ax.set_ylim(y_floor, 1.0)
-    ax.set_xlim(0, MAX_ITER)
-    ax.set_xlabel(r"$n$")
-    
-    # Updated clearer label
-    ax.set_ylabel(r"$1 - Q(\bm{x}_n^*, N=\infty)$")
     
     # Light gray dotted gridlines
     ax.grid(True, which="both", color="lightgray", linestyle=":", linewidth=0.5, alpha=0.7)
@@ -212,19 +217,16 @@ def draw_scale_trend(ax):
             continue
 
         mat = trace_matrix(traces, floor=SCALE_INFLOOR)
-        q05 = quantile_rows(mat, 0.05)
         q50 = quantile_rows(mat, 0.50)
-        q95 = quantile_rows(mat, 0.95)
         c = group["color"]
+        ls = group["ls"]
 
         _fuzzy_gradient_fill(ax, xs, mat, color=c)
-        #ax.plot(xs, q05, color=c, lw=0.8, ls="--", alpha=0.5, zorder=3)
-        #ax.plot(xs, q95, color=c, lw=0.8, ls="--", alpha=0.5, zorder=3)
-        ax.plot(xs, q50, color=c, label=group["label"], zorder=4)
+        ax.plot(xs, q50, color=c, linestyle=ls, label=group["label"], zorder=4)
 
         print(f"  {group['label']}: {mat.shape[0]} traces, final median {q50[-1]:.6g}")
 
-    style_log_axis(ax, SCALE_INFLOOR)
+    style_log_axis(ax)
 
 
 def draw_selected_n_trend(ax):
@@ -239,14 +241,10 @@ def draw_selected_n_trend(ax):
             continue
 
         mat = trace_matrix(traces, floor=TRACE_INFLOOR)
-        q05 = quantile_rows(mat, 0.05)
         q50 = quantile_rows(mat, 0.50)
-        q95 = quantile_rows(mat, 0.95)
         c = N_COLORS[n_label]
 
         _fuzzy_gradient_fill(ax, xs, mat, color=c)
-        #ax.plot(xs, q05, color=c, lw=0.8, ls="--", alpha=0.5, zorder=3)
-        #ax.plot(xs, q95, color=c, lw=0.8, ls="--", alpha=0.5, zorder=3)
         ax.plot(xs, q50, color=c, label=N_LEGENDS[n_label], zorder=4)
 
         if n_label != "Inf":
@@ -258,7 +256,7 @@ def draw_selected_n_trend(ax):
     for ref, c in dash_refs:
         ax.axhline(ref, color=c, alpha=0.98, linestyle="--", linewidth=1.5, zorder=1)
 
-    style_log_axis(ax, SELECTED_Y_FLOOR)
+    style_log_axis(ax)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -267,23 +265,32 @@ def draw_selected_n_trend(ax):
 def main():
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Use gridspec_kw to make ax_selected (bottom) taller than ax_scale (top)
     fig, (ax_scale, ax_selected) = plt.subplots(
         2, 1,
+        gridspec_kw={'height_ratios': [1, 1]},
         constrained_layout=False,
     )
     fig.subplots_adjust(left=0.15, right=0.95, top=0.97, bottom=0.08, hspace=0.15)
 
     print("Panel A — scale trend:")
     draw_scale_trend(ax_scale)
+    ax_scale.set_ylabel(r"$1 - Q(\bm{x}_n^*, N=\infty)$")
     ax_scale.set_xlabel("")
     ax_scale.set_xticklabels([])
-    ax_scale.set_yscale("log")
-    ax_scale.legend(loc="upper right", frameon=False, handlelength=2.0, labelspacing=0.3)
+    ax_scale.legend(loc="upper right", frameon=False, handlelength=1.0, labelspacing=0.3)
+    ax_scale.text(0.03, 0.05, r"\textbf{a)}", transform=ax_scale.transAxes, ha="left", va="bottom", fontsize=12)
+    ax_scale.set_ylim([1e-7, 1.0])
+    ax_scale.set_yticks([1e-6, 1e-4, 1e-2, 1.0])
 
     print("Panel B — selected-N trend:")
     draw_selected_n_trend(ax_selected)
-    ax_selected.set_yscale("log")
-    ax_selected.legend(loc="upper right", frameon=False, handlelength=2.0, labelspacing=0.3)
+    ax_selected.set_ylabel(r"$1 - Q(\bm{x}_n^*, N)$")
+    ax_selected.set_xlabel(r"$n$")
+    ax_selected.legend(loc="upper right", frameon=False, handlelength=1.0, labelspacing=0.3)
+    ax_selected.text(0.03, 0.05, r"\textbf{b)}", transform=ax_selected.transAxes, ha="left", va="bottom", fontsize=12)
+    ax_selected.set_ylim([1e-7, 1.0])
+    ax_selected.set_yticks([1e-6, 1e-4, 1e-2, 1.0])
     
     out = FIGURE_DIR / "figure_ab_vertical.pdf"
     plt.savefig(out, bbox_inches="tight")
