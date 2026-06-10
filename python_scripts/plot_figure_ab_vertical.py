@@ -17,6 +17,7 @@ from scipy.ndimage import gaussian_filter1d
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from matplotlib.lines import Line2D
 import seaborn as sns
 from pathlib import Path
 
@@ -25,21 +26,23 @@ from pathlib import Path
 # APS Plot Formatting (PRX Intelligence / PR Applied)
 # ---------------------------------------------------------------------------
 # Single column width: 3.375 inches.
+# Single column width: 3.375 inches.
 mpl.rcParams.update({
-    "figure.figsize": (3.375, 6.0),  
+    "figure.figsize": (3.375, 4.5),  
     "font.family": "serif",          
     "mathtext.fontset": "cm",        
-    "font.size": 12,                 
-    "axes.labelsize": 12,
-    "xtick.labelsize": 12,
-    "ytick.labelsize": 12,
-    "legend.fontsize": 10,           
+    "font.size": 10,                 
+    "axes.labelsize": 10,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 9,           
     "lines.linewidth": 1.5,          
 })
 
+# IMPORTANT: Added \usepackage{xcolor} so we can use \textcolor{white}
 plt.rcParams.update({
     "text.usetex": True,
-    "text.latex.preamble": r"\usepackage{amsmath}\usepackage{bm}",
+    "text.latex.preamble": r"\usepackage{amsmath}\usepackage{bm}\usepackage{xcolor}",
     "backend": "pdf",   
 })
 
@@ -57,6 +60,7 @@ FIGURE_DIR = REPO_ROOT
 MAX_ITER = 100
 TRACE_INFLOOR = 1e-10
 SCALE_INFLOOR = 1e-10  
+SCALE_INFLOOR = 1e-10  
 SELECTED_Y_FLOOR = 1e-7
 SCALE_DROP_FAILURES = True
 SCALE_FAILURE_Q_THRESHOLD = 0.99
@@ -68,23 +72,25 @@ MODEL_DASH_ALPHA = 0.4947
 # Palettes
 # Generate 8 colors from magma to access distinct adjacent dark shades
 magma_colors = sns.color_palette("magma", n_colors=8).as_hex()
+# Generate 8 colors from magma to access distinct adjacent dark shades
+magma_colors = sns.color_palette("magma", n_colors=8).as_hex()
 
 SCALE_GROUPS = [
     {
-        "label": r"$r$ = 0.1",
-        "color": "#010152",  # Very dark purple (similar to 0, but distinct)
+        "label": "0.1",
+        "color": "#648FFF",        # Aesthetic vibrant light blue
         "ls": ":",                 
         "dir": DATA_DIR / "traces_freqspan10_bound010_NInf_lhs12_restart_fullbudget100_100seeds",
     },
     {
-        "label": r"$r$ = 0.5",
+        "label": "0.5",
         "color": magma_colors[0],  # Absolute darkest (Matches N=Inf exactly)
         "ls": "-",                
         "dir": DATA_DIR / "traces_freqspan10_bound050_NInf_lhs12_restart_fullbudget100_100seeds",
     },
     {
-        "label": r"$r$ = 1.0",
-        "color": "#000000",  # Dark purple (similar to 0, but distinct)
+        "label": "1.0",
+        "color": "#005AB5",        # Aesthetic rich deep blue
         "ls": "--",                 
         "dir": DATA_DIR / "traces_freqspan10_bound100_NInf_lhs12_restart_fullbudget100_100seeds",
     },
@@ -97,13 +103,18 @@ N_COLORS = {
     "10000":  magma_colors[4], # Magenta/Purple
     "100000": magma_colors[3], # Medium-dark Purple
     "Inf":    magma_colors[0], # Absolute darkest
+    "100":    magma_colors[6], # Orange
+    "1000":   magma_colors[5], # Pink/Orange
+    "10000":  magma_colors[4], # Magenta/Purple
+    "100000": magma_colors[3], # Medium-dark Purple
+    "Inf":    magma_colors[0], # Absolute darkest
 }
 N_LEGENDS = {
-    "100":    r"$N = 10^2$",
-    "1000":   r"$N = 10^3$",
-    "10000":  r"$N = 10^4$",
-    "100000": r"$N = 10^5$",
-    "Inf":    r"$N = \infty$",
+    "100":    r"$10^2$",
+    "1000":   r"$10^3$",
+    "10000":  r"$10^4$",
+    "100000": r"$10^5$",
+    "Inf":    r"$\infty$",
 }
 
 # ---------------------------------------------------------------------------
@@ -152,6 +163,7 @@ def trace_matrix(traces, floor: float = TRACE_INFLOOR) -> np.ndarray:
 
 def full_l1_trace_dir(n_label: str) -> Path:
     return DATA_DIR / f"traces_freqspan10_bound050_full_l1_N{n_label}_nostop100_stream_100seeds"
+    return DATA_DIR / f"traces_freqspan10_bound050_full_l1_N{n_label}_nostop100_stream_100seeds"
 
 def model_dash_infid(n_label: str) -> float:
     return MODEL_DASH_EPS_INF + MODEL_DASH_A * float(n_label) ** (-MODEL_DASH_ALPHA)
@@ -164,6 +176,7 @@ def quantile_rows(matrix: np.ndarray, q: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _fuzzy_gradient_fill(ax, xs, mat, color, zorder=2, smooth_sigma=None):
+    """Layered quantile shading."""
     """Layered quantile shading."""
     n_layers   = 50
     quantiles  = np.linspace(0.05, 0.45, n_layers)
@@ -182,16 +195,19 @@ def style_log_axis(ax):
     ax.set_ylim(1e-7, 1.0)
     ax.set_yscale("log")
     
+def style_log_axis(ax):
+    ax.set_xlim(0, MAX_ITER)
+    ax.set_ylim(1e-7, 1.0)
+    ax.set_yscale("log")
+    
     ax.set_xticks([0, 20, 40, 60, 80, 100])
     ax.set_xticklabels(["0", "20", "40", "60", "80", "100"])
     
-    # Setup Locators for major and minor ticks to ensure all exist
     locmaj = ticker.LogLocator(base=10.0, numticks=15)
     ax.yaxis.set_major_locator(locmaj)
     locmin = ticker.LogLocator(base=10.0, subs=np.arange(2, 10) * .1, numticks=100)
     ax.yaxis.set_minor_locator(locmin)
     
-    # Custom formatter to only print labels for desired specific exponents
     def custom_fmt(x, pos):
         if x > 0:
             exp = int(np.round(np.log10(x)))
@@ -200,15 +216,14 @@ def style_log_axis(ax):
         return ""
     ax.yaxis.set_major_formatter(ticker.FuncFormatter(custom_fmt))
     
-    # Inward ticks for both major and minor
     ax.tick_params(which="both", direction="in", top=True, right=True)
-    
-    # Light gray dotted gridlines
     ax.grid(True, which="both", color="lightgray", linestyle=":", linewidth=0.5, alpha=0.7)
 
 
 def draw_scale_trend(ax):
     xs = np.arange(1, MAX_ITER + 1)
+    handles = {}
+    
     for group in SCALE_GROUPS:
         try:
             traces = read_trace_group(group["dir"], drop_failures=SCALE_DROP_FAILURES)
@@ -220,18 +235,22 @@ def draw_scale_trend(ax):
         q50 = quantile_rows(mat, 0.50)
         c = group["color"]
         ls = group["ls"]
+        ls = group["ls"]
 
         _fuzzy_gradient_fill(ax, xs, mat, color=c)
-        ax.plot(xs, q50, color=c, linestyle=ls, label=group["label"], zorder=4)
+        line, = ax.plot(xs, q50, color=c, linestyle=ls, zorder=4)
+        handles[group["label"]] = line
 
         print(f"  {group['label']}: {mat.shape[0]} traces, final median {q50[-1]:.6g}")
 
     style_log_axis(ax)
+    return handles
 
 
 def draw_selected_n_trend(ax):
     xs = np.arange(1, MAX_ITER + 1)
     dash_refs = []
+    handles = {}
 
     for n_label in N_LABELS:
         try:
@@ -245,7 +264,8 @@ def draw_selected_n_trend(ax):
         c = N_COLORS[n_label]
 
         _fuzzy_gradient_fill(ax, xs, mat, color=c)
-        ax.plot(xs, q50, color=c, label=N_LEGENDS[n_label], zorder=4)
+        line, = ax.plot(xs, q50, color=c, zorder=4)
+        handles[n_label] = line
 
         if n_label != "Inf":
             ref = max(model_dash_infid(n_label), TRACE_INFLOOR)
@@ -257,6 +277,15 @@ def draw_selected_n_trend(ax):
         ax.axhline(ref, color=c, alpha=0.98, linestyle="--", linewidth=1.5, zorder=1)
 
     style_log_axis(ax)
+    return handles
+
+def add_side_title(ax, leg, text):
+    """Dynamically places a text title to the immediate left of the legend box."""
+    fig = ax.figure
+    fig.canvas.draw()
+    bbox = leg.get_window_extent().transformed(ax.transAxes.inverted())
+    ax.text(bbox.x0 - 0.03, bbox.y0 + (bbox.height / 2), text, 
+            transform=ax.transAxes, ha="right", va="center", fontsize=10)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -269,29 +298,93 @@ def main():
     fig, (ax_scale, ax_selected) = plt.subplots(
         2, 1,
         gridspec_kw={'height_ratios': [1, 1]},
+        gridspec_kw={'height_ratios': [1, 1]},
         constrained_layout=False,
     )
-    fig.subplots_adjust(left=0.15, right=0.95, top=0.97, bottom=0.08, hspace=0.15)
+    
+    fig.subplots_adjust(left=0.20, right=0.95, top=0.92, bottom=0.15, hspace=0.1)
 
+    # -----------------------------------------------------------------------
+    # PANEL A: SCALE TREND
+    # -----------------------------------------------------------------------
     print("Panel A — scale trend:")
-    draw_scale_trend(ax_scale)
-    ax_scale.set_ylabel(r"$1 - Q(\bm{x}_n^*, N=\infty)$")
+    h_a_dict = draw_scale_trend(ax_scale)
+    
+    handles_a = []
+    labels_a = []
+    for g in SCALE_GROUPS:
+        if g["label"] in h_a_dict:
+            handles_a.append(h_a_dict[g["label"]])
+            labels_a.append(g["label"])
+
+    ax_scale.set_ylabel(r"$1 - Q_{det}(\bm{x}_n^*)$")
     ax_scale.set_xlabel("")
     ax_scale.set_xticklabels([])
-    ax_scale.legend(loc="upper right", frameon=False, handlelength=1.0, labelspacing=0.3)
-    ax_scale.text(0.03, 0.05, r"\textbf{a)}", transform=ax_scale.transAxes, ha="left", va="bottom", fontsize=12)
+    ax_scale.text(0.03, 0.05, r"\textbf{a)}", transform=ax_scale.transAxes, ha="left", va="bottom", fontsize=9)
     ax_scale.set_ylim([1e-7, 1.0])
     ax_scale.set_yticks([1e-6, 1e-4, 1e-2, 1.0])
 
+    # Legend A 
+    leg_a = ax_scale.legend(handles_a, labels_a, loc="upper right", bbox_to_anchor=(0.99, 0.99), 
+                            frameon=True, edgecolor="black", facecolor="white", 
+                            fancybox=False, handlelength=2, labelspacing=0.2)
+    add_side_title(ax_scale, leg_a, r"$r$")
+
+
+    # -----------------------------------------------------------------------
+    # PANEL B: SELECTED N TREND
+    # -----------------------------------------------------------------------
     print("Panel B — selected-N trend:")
-    draw_selected_n_trend(ax_selected)
-    ax_selected.set_ylabel(r"$1 - Q(\bm{x}_n^*, N)$")
+    h_b_dict = draw_selected_n_trend(ax_selected)
+    
+    # White line dummy handle to match the spacing flawlessly
+    dummy_handle = Line2D([], [], color='white', linestyle='-', linewidth=1.5)
+    
+    # 1. Master Legend
+    handles_b1 = [
+        h_b_dict["100"], h_b_dict["1000"], h_b_dict["10000"],
+        dummy_handle, dummy_handle, dummy_handle,
+    ]
+    
+    # Put an actual string in the 4th slot so Matplotlib perfectly calculates the width
+    labels_b1 = [
+        r"$10^2$",
+        r"$10^3$",
+        r"$10^4$",
+        r"$10^4$",   # <-- We will make this invisible below
+        "",
+        "",
+    ]
+
+    ax_selected.set_ylabel(r"$1 - Q_{det}(\bm{x}_n^*)$")
     ax_selected.set_xlabel(r"$n$")
-    ax_selected.legend(loc="upper right", frameon=False, handlelength=1.0, labelspacing=0.3)
-    ax_selected.text(0.03, 0.05, r"\textbf{b)}", transform=ax_selected.transAxes, ha="left", va="bottom", fontsize=12)
+    ax_selected.text(0.03, 0.05, r"\textbf{b)}", transform=ax_selected.transAxes, ha="left", va="bottom", fontsize=9)
     ax_selected.set_ylim([1e-7, 1.0])
     ax_selected.set_yticks([1e-6, 1e-4, 1e-2, 1.0])
     
+    # Draw the box and the 3 items on the left
+    leg_b1 = ax_selected.legend(handles_b1, labels_b1, loc="center right", bbox_to_anchor=(0.99, 0.82),
+                                ncol=2, frameon=True, edgecolor="black", facecolor="white",
+                                fancybox=False, handlelength=1.5, labelspacing=0.2, columnspacing=0.5)
+    ax_selected.add_artist(leg_b1)
+    
+    # --- THE MAGIC BULLET ---
+    # Grab the text elements in the legend and make the 4th one (index 3) completely transparent
+    leg_b1.get_texts()[3].set_alpha(0)
+    
+    # 2. Slave Legend (Vertically centered in the dummy space)
+    handles_b2 = [h_b_dict["100000"], h_b_dict["Inf"]]
+    labels_b2 = [r"$10^5$", r"$\infty$"]
+    
+    # Shifted slightly left so it perfectly overlays the transparent text
+    leg_b2 = ax_selected.legend(handles_b2, labels_b2, loc="center right", bbox_to_anchor=(0.99, 0.82),
+                                ncol=1, frameon=False, 
+                                handlelength=1.5, labelspacing=0.4)
+    
+    # Add the N title outside the master box
+    add_side_title(ax_selected, leg_b1, r"$N$")
+
+    # Output
     out = FIGURE_DIR / "figure_ab_vertical.pdf"
     plt.savefig(out, bbox_inches="tight")
     print(f"Saved → {out}")
