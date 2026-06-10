@@ -4,26 +4,25 @@ Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
 using Distributed, Statistics, Printf, Random, LinearAlgebra
 using QuasiMonteCarlo
 
+# ── Workers ───────────────────────────────────────────────────────────────────
+const N_WORKERS = parse(Int, get(ENV, "GP_STUDY_N_WORKERS", "19"))
 if nprocs() == 1
-    n_add = parse(Int, get(ENV, "GP_STUDY_N_WORKERS",
-                           string(max(1, Sys.CPU_THREADS - 1))))
-    addprocs(n_add)
+    addprocs(N_WORKERS)
 end
 
 @everywhere begin
     import Pkg
     Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
     include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
-    using LinearAlgebra, Random, Statistics
+    using LinearAlgebra, Random, Statistics, Distributions
     using SpecialFunctions: erf
     BLAS.set_num_threads(1)
-    const _INV_SQRT2π = 1.0 / 2.5066282746310002
+
+    const _INV_SQRT2π = 1.0 / sqrt(2π)
     const _SQRT_2     = sqrt(2.0)
     const _INV_SQRTΠ  = 1.0 / sqrt(π)
-    
     @inline _Φ(z::Float64) = 0.5 * (1.0 + erf(z / _SQRT_2))
     @inline _φ(z::Float64) = exp(-0.5 * z^2) * _INV_SQRT2π
-    
     @inline function _crps(μ::Float64, σ::Float64, y::Float64)
         σ < 1e-12 && return abs(y - μ)
         z = (y - μ) / σ
@@ -31,343 +30,420 @@ end
     end
 end
 
-# ── Physical setup ────────────────────────────────────────────────────────────
-t    = 100.0
+# ── Physical setup ─────────────────────────────────────────────────────────────
+# Matches optimization_data_generation.jl: TRACE_FREQ_SPAN_KHZ=10, TRACE_BOUND_SCALE=0.5
+const FREQ_SPAN_KHZ = 10.0
+const BOUND_SCALE   = 0.5
+
+t = 100.0
 base = CalibrationCode.ideal(t)
-f_cl0 = base.f_cl; f_sb0 = base.f_sb; A0 = base.A
-span_fcl = 2.0e3 * 2π
-span_fsb = 2.0e3 * 2π
+f_cl0 = Float64(base.f_cl)
+f_sb0 = Float64(base.f_sb)
+A0    = Float64(base.A)
+
+# span_fcl = FREQ_SPAN_KHZ_OVERRIDE * 1e3  (no 2pi factor, matching opt_data_gen.jl line 228)
+span_fcl = FREQ_SPAN_KHZ * 1e3
+span_fsb = FREQ_SPAN_KHZ * 1e3
 span_A   = 1.2 * A0 - A0
 
-@everywhere const _t       = $t
-@everywhere const _f_cl0   = $f_cl0
-@everywhere const _f_sb0   = $f_sb0
-@everywhere const _A0      = $A0
+@everywhere const _t        = $t
+@everywhere const _f_cl0    = $f_cl0
+@everywhere const _f_sb0    = $f_sb0
+@everywhere const _A0       = $A0
 @everywhere const _span_fcl = $span_fcl
 @everywhere const _span_fsb = $span_fsb
 @everywhere const _span_A   = $span_A
+@everywhere const _BOUND       = $BOUND_SCALE   # domain is [-_BOUND, _BOUND]^3
+@everywhere const _NEAR_THRESH = $NEAR_THRESH
 
-@everywhere function Q_fun(u::Vector{Float64}, N::Int)
-    fcl = _f_cl0 + _span_fcl * u[1]
-    fsb = _f_sb0 + _span_fsb * u[2]
-    A   = _A0    + _span_A   * u[3]
-    Q, σ = CalibrationCode.Q_varMS_σ(_t, fcl, fsb, A; N=N, numMS=2)
-    return clamp(Float64(Q), 0.0, 1.0), Float64(σ)
+# ── Score functions (full_l1, matching TRACE_SCORE_MODE=full_l1) ───────────────
+@everywhere begin
+    function _u_to_params(u::Vector{Float64})
+        return (_f_cl0 + _span_fcl * u[1],
+                _f_sb0 + _span_fsb * u[2],
+                _A0    + _span_A   * u[3])
+    end
+
+    function _varms_weights(u::Vector{Float64})
+        fcl, fsb, A = _u_to_params(u)
+        subgates = [CalibrationCode.MSSubgate(π / 2, 0.0),
+                    CalibrationCode.MSSubgate(π / 2, 0.0)]
+        pulses = CalibrationCode.build_closed_loop_ms_sequence(_t, fcl, fsb, A, subgates)
+        pops   = CalibrationCode.populations_ms_sequence(pulses)
+        w = Float64[max(pops.gg, 0.0), max(pops.eg, 0.0),
+                    max(pops.ge, 0.0), max(pops.ee, 0.0)]
+        s = sum(w)
+        s > 0.0 && (w ./= s)
+        return w
+    end
+
+    @inline function _full_l1_score(p_ss::Float64, p_sd::Float64,
+                                    p_ds::Float64, p_dd::Float64)
+        l1 = abs(p_ss) + abs(p_sd) + abs(p_ds) + abs(p_dd - 1.0)
+        return clamp(1.0 - 0.5 * l1, 0.0, 1.0)
+    end
+
+    # Deterministic (noise-free) score.
+    function Q_det(u::Vector{Float64})
+        w = _varms_weights(u)
+        return _full_l1_score(w[1], w[2], w[3], w[4])
+    end
+
+    # Stochastic score via multinomial shot noise.
+    # σ uses the exact full_l1 noise model: sqrt(p_dd*(1-p_dd)/N).
+    function Q_fun(u::Vector{Float64}, N::Real, rng::AbstractRNG)
+        w = _varms_weights(u)
+        if isinf(N)
+            return _full_l1_score(w[1], w[2], w[3], w[4]), 0.0
+        end
+        n_int  = Int(N)
+        counts = rand(rng, Multinomial(n_int, w))
+        n_f    = Float64(n_int)
+        y = _full_l1_score(counts[1]/n_f, counts[2]/n_f,
+                            counts[3]/n_f, counts[4]/n_f)
+        σ = sqrt(max(w[4] * (1.0 - w[4]), 0.0) / n_f)
+        return y, σ
+    end
 end
 
-# ── Study parameters ──────────────────────────────────────────────────────────
-const N_PTS_LIST   = [100, 250, 500, 1000]
-const N_SHOTS_LIST = [50, 100, 250, 400, 1000, 2500]
-const N_SEEDS      = parse(Int, get(ENV, "GP_STUDY_N_SEEDS", "50"))
-const N_HIGH       = parse(Int, get(ENV, "GP_STUDY_N_HIGH",  "100000"))
-const N_TEST       = parse(Int, get(ENV, "GP_STUDY_N_TEST",  "5000"))
-@everywhere const N_INIT_ADAPT = 50
+# ── Study parameters ───────────────────────────────────────────────────────────
+const N_PTS_LIST   = [10, 50, 100, 250, 500, 1000]
+const N_SHOTS_LIST = [100, 1000, 10000, 100000, Inf]
+const N_SEEDS = parse(Int, get(ENV, "GP_STUDY_N_SEEDS", "50"))
+const N_TEST  = parse(Int, get(ENV, "GP_STUDY_N_TEST",  "5000"))
+const N_SLICE    = 100
+const NEAR_THRESH = 0.1   # off-axis proximity for training-point overlay
 
-println("GP fit quality study — Q_varMS(m=2), 3D")
-println("  N_pts    : $(N_PTS_LIST)")
-println("  N_shots  : $(N_SHOTS_LIST)")
-println("  Seeds    : $(N_SEEDS)   N_high = $(N_HIGH)   N_test = $(N_TEST)")
+println("GP fit quality study — full_l1 score, FREQ_SPAN=$(FREQ_SPAN_KHZ) kHz, BOUND=$(BOUND_SCALE)")
+println("  N_pts    : $N_PTS_LIST")
+println("  N_shots  : $N_SHOTS_LIST")
+println("  Seeds    : $N_SEEDS   N_test = $N_TEST")
 println("  Workers  : $(nworkers())")
-
-# ── Ground truth: Sobol test grid ─────────────────────────────────────────────
-println("\nBuilding ground truth test grid ($(N_TEST) pts × N=$(N_HIGH)) …")
 flush(stdout)
-lb_3d = [-1.0, -1.0, -1.0]; ub_3d = [1.0, 1.0, 1.0]
-_test_mat = QuasiMonteCarlo.sample(N_TEST, lb_3d, ub_3d, QuasiMonteCarlo.SobolSample())
-_test_pts = [_test_mat[:, i] for i in 1:N_TEST]
 
-Q_true_vec = pmap(_test_pts; batch_size=8) do u
-    Q_fun(u, N_HIGH)[1]
+# ── Ground truth test grid ─────────────────────────────────────────────────────
+println("\nBuilding test grid ($N_TEST pts in [-$(BOUND_SCALE), $(BOUND_SCALE)]^3) ...")
+flush(stdout)
+lb3d = fill(-BOUND_SCALE, 3)
+ub3d = fill( BOUND_SCALE, 3)
+_test_mat = QuasiMonteCarlo.sample(N_TEST, lb3d, ub3d, QuasiMonteCarlo.SobolSample())
+
+# Precompute Q_det and p_dd (ee population) for every test point.
+# p_dd feeds the exact full_l1 shot noise variance: σ² = p_dd*(1-p_dd)/N.
+_q_pdd_vec = pmap(1:N_TEST; batch_size=32) do i
+    u = _test_mat[:, i]
+    w = _varms_weights(u)
+    q = _full_l1_score(w[1], w[2], w[3], w[4])
+    (q, w[4])
 end
-Q_true_arr = Float64.(Q_true_vec)
-println(@sprintf("  Q_true  mean=%.4f  min=%.4f  max=%.4f",
+Q_true_arr = Float64[r[1] for r in _q_pdd_vec]
+p_dd_arr   = Float64[r[2] for r in _q_pdd_vec]
+println(@sprintf("  Q_true: mean=%.4f  min=%.4f  max=%.4f",
                  mean(Q_true_arr), minimum(Q_true_arr), maximum(Q_true_arr)))
 flush(stdout)
 
-@everywhere const _test_mat_w  = $_test_mat
-@everywhere const _Q_true_w    = $Q_true_arr
-@everywhere const _N_TEST_w    = $N_TEST
-@everywhere const _N_HIGH_w    = $N_HIGH
+@everywhere const _test_mat_w = $_test_mat
+@everywhere const _Q_true_w   = $Q_true_arr
+@everywhere const _p_dd_w     = $p_dd_arr
+@everywhere const _N_TEST_w   = $N_TEST
 
-# ── 1D Slice Setup ────────────────────────────────────────────────────────────
-const N_SLICE = 100
-const u_grid = range(-1.0, 1.0, length=N_SLICE)
+# ── Slice ground truth (Q_det, independent of seed/N_shots/n_pts) ─────────────
+println("Precomputing 1D slice ground truth ...")
+flush(stdout)
+const _slice_u_vec = collect(range(-BOUND_SCALE, BOUND_SCALE; length=N_SLICE))
+Q_det_fcl = Float64[Q_det([u, 0.0, 0.0]) for u in _slice_u_vec]
+Q_det_fsb = Float64[Q_det([0.0, u, 0.0]) for u in _slice_u_vec]
+Q_det_amp = Float64[Q_det([0.0, 0.0, u]) for u in _slice_u_vec]
 
-slice_fcl_pts = [[u, 0.0, 0.0] for u in u_grid]
-slice_fsb_pts = [[0.0, u, 0.0] for u in u_grid]
+@everywhere const _slice_u         = $_slice_u_vec
+@everywhere const _N_SLICE         = $N_SLICE
+@everywhere const _Q_det_slice_fcl = $Q_det_fcl
+@everywhere const _Q_det_slice_fsb = $Q_det_fsb
+@everywhere const _Q_det_slice_amp = $Q_det_amp
 
-println("Computing high-N ground truth for 1D slices...")
-Q_true_slice_fcl = [Q_fun(pt, N_HIGH)[1] for pt in slice_fcl_pts]
-Q_true_slice_fsb = [Q_fun(pt, N_HIGH)[1] for pt in slice_fsb_pts]
+# ── Core worker function ───────────────────────────────────────────────────────
+@everywhere begin
+    # GP quality metrics against precomputed test grid.
+    # σ_noise² = p_dd*(1-p_dd)/N (exact full_l1 model); 0 when N=Inf.
+    # The combined metric (cov95_adj, nlpd_adj, crps) accounts for both
+    # GP uncertainty and measurement noise simultaneously.
+    function compute_metrics(μs::Vector{Float64}, σs::Vector{Float64},
+                             Q_ref::Vector{Float64}, p_dd_ref::Vector{Float64},
+                             N_shots::Real)
+        n = length(Q_ref)
 
-@everywhere const _slice_fcl_mat = $(hcat(slice_fcl_pts...))
-@everywhere const _slice_fsb_mat = $(hcat(slice_fsb_pts...))
-@everywhere const _N_SLICE       = $N_SLICE
+        e² = (μs .- Q_ref) .^ 2
+        rmse    = sqrt(mean(e²))
+        rmse_se = std(e²) / (2.0 * max(rmse, 1e-12) * sqrt(n))
 
-# ── Core Functions ────────────────────────────────────────────────────────────
-@everywhere function predict_test(gp)
-    μs = Vector{Float64}(undef, _N_TEST_w)
-    σs = Vector{Float64}(undef, _N_TEST_w)
-    for i in 1:_N_TEST_w
-        μ_i, s2_i = CalibrationCode.predict_latent(gp, _test_mat_w[:, i])
-        μs[i] = μ_i
-        σs[i] = sqrt(max(s2_i, 0.0))
-    end
-    return μs, σs
-end
+        σ_noise² = isinf(N_shots) ? zeros(Float64, n) :
+                   p_dd_ref .* (1.0 .- p_dd_ref) ./ Float64(N_shots)
+        rmse_corr        = sqrt(max(mean(e²) - mean(σ_noise²), 0.0))
+        mae              = mean(abs.(μs .- Q_ref))
+        mean_sigma_gp    = mean(σs)
+        mean_sigma_noise = sqrt(mean(σ_noise²))
 
-@everywhere function compute_metrics(μs::Vector{Float64}, σs::Vector{Float64}, Q_ref::Vector{Float64})
-    n  = length(Q_ref)
-    e² = (μs .- Q_ref) .^ 2          
+        # GP-only (ignores measurement noise)
+        z_gp  = (μs .- Q_ref) ./ max.(σs, 1e-10)
+        cov80 = mean(abs.(z_gp) .<= 1.282)
+        cov90 = mean(abs.(z_gp) .<= 1.645)
+        cov95 = mean(abs.(z_gp) .<= 1.960)
+        nlpd  = mean(0.5 .* z_gp .^ 2 .+ log.(max.(σs, 1e-10)) .- log(_INV_SQRT2π))
 
-    rmse   = sqrt(mean(e²))
-    rmse_se = std(e²) / (2.0 * max(rmse, 1e-12) * sqrt(n))
+        # GP + measurement noise combined
+        σ_total   = sqrt.(σs .^ 2 .+ σ_noise²)
+        z_adj     = (μs .- Q_ref) ./ max.(σ_total, 1e-10)
+        cov95_adj = mean(abs.(z_adj) .<= 1.960)
+        nlpd_adj  = mean(0.5 .* z_adj .^ 2 .+ log.(max.(σ_total, 1e-10)) .- log(_INV_SQRT2π))
+        crps      = mean(_crps.(μs, σ_total, Q_ref))
+        # Mean squared standardized error: (μ_GP - Q_true)² / σ_total²
+        # Calibrated predictor → msse ≈ 1; >1 overconfident, <1 underconfident.
+        msse      = mean(z_adj .^ 2)
+        msse_gp   = mean(z_gp  .^ 2)
 
-    σ_ref² = Q_ref .* (1.0 .- Q_ref) ./ _N_HIGH_w
-    rmse_corr = sqrt(max(mean(e²) - mean(σ_ref²), 0.0))
-
-    mae    = mean(abs.(μs .- Q_ref))
-    msig   = mean(σs)
-
-    z_gp  = (μs .- Q_ref) ./ max.(σs, 1e-10)
-    cov80 = mean(abs.(z_gp) .<= 1.282)
-    cov90 = mean(abs.(z_gp) .<= 1.645)
-    cov95 = mean(abs.(z_gp) .<= 1.960)
-
-    σ_total = sqrt.(σs .^ 2 .+ σ_ref²)
-    z_adj   = (μs .- Q_ref) ./ max.(σ_total, 1e-10)
-    cov95_adj = mean(abs.(z_adj) .<= 1.960)
-
-    nlpd = mean(0.5 .* z_gp .^ 2 .+ log.(max.(σs, 1e-10)) .- log(_INV_SQRT2π))
-    nlpd_adj = mean(0.5 .* z_adj .^ 2 .+ log.(max.(σ_total, 1e-10)) .- log(_INV_SQRT2π))
-    crps = mean(_crps.(μs, σ_total, Q_ref))
-
-    return (rmse=rmse, rmse_se=rmse_se, rmse_corr=rmse_corr,
-            mae=mae, mean_sigma=msig,
-            cov80=cov80, cov90=cov90, cov95=cov95, cov95_adj=cov95_adj,
-            nlpd=nlpd, nlpd_adj=nlpd_adj, crps=crps)
-end
-
-@everywhere function fit_and_metrics(X_mat::Matrix{Float64}, y::Vector{Float64}, σy::Vector{Float64}, rng::AbstractRNG; min_sep::Float64=0.02)
-    gp = try
-        CalibrationCode.fit_heterogp(X_mat, y, σy;
-            n_restarts=4, rng=rng,
-            ℓ_bounds=(0.05, 1.5), σf_bounds=(0.3, 2.0), c_bounds=(0.05, 3.0))
-    catch
-        return nothing
+        return (rmse=rmse, rmse_se=rmse_se, rmse_corr=rmse_corr,
+                mae=mae, mean_sigma_gp=mean_sigma_gp,
+                mean_sigma_noise=mean_sigma_noise,
+                cov80=cov80, cov90=cov90, cov95=cov95,
+                cov95_adj=cov95_adj, nlpd=nlpd, nlpd_adj=nlpd_adj,
+                crps=crps, msse=msse, msse_gp=msse_gp)
     end
 
-    d    = size(X_mat, 1)
-    n_tr = size(X_mat, 2)
-    sep2 = min_sep * min_sep
-    valid = trues(_N_TEST_w)
-    @inbounds for j in 1:n_tr
-        for i in 1:_N_TEST_w
-            valid[i] || continue  
-            d2 = 0.0
-            for k in 1:d
-                Δ = _test_mat_w[k, i] - X_mat[k, j]
-                d2 += Δ * Δ
-            end
-            d2 < sep2 && (valid[i] = false)
-        end
-    end
-    n_valid = sum(valid)
-    n_valid < 10 && return nothing   
+    function run_config(n_pts::Int, N_shots::Real, seed::Int)
+        rng_train = MersenneTwister(seed)
+        rng_gp    = MersenneTwister(seed + 100_000)
+        rng_slice = MersenneTwister(seed + 200_000)
 
-    μs, σs = predict_test(gp)
-    m = compute_metrics(μs[valid], σs[valid], _Q_true_w[valid])
-    return (; m..., n_valid=n_valid, l1=gp.ℓ[1], l2=gp.ℓ[2], l3=gp.ℓ[3], sf=gp.σf, c=gp.c, gp=gp)
-end
+        # Training points: uniform random in [-BOUND, BOUND]^3
+        pts   = [rand(rng_train, 3) .* (2.0 * _BOUND) .- _BOUND for _ in 1:n_pts]
+        X_mat = hcat(pts...)
 
-@everywhere function save_slices(gp, mode::String, n_pts::Int, N_shots::Int)
-    μ_fcl = Vector{Float64}(undef, _N_SLICE)
-    σ_fcl = Vector{Float64}(undef, _N_SLICE)
-    for i in 1:_N_SLICE
-        μ_fcl[i], s2 = CalibrationCode.predict_latent(gp, _slice_fcl_mat[:, i])
-        σ_fcl[i] = sqrt(max(s2, 0.0))
-    end
-    
-    μ_fsb = Vector{Float64}(undef, _N_SLICE)
-    σ_fsb = Vector{Float64}(undef, _N_SLICE)
-    for i in 1:_N_SLICE
-        μ_fsb[i], s2 = CalibrationCode.predict_latent(gp, _slice_fsb_mat[:, i])
-        σ_fsb[i] = sqrt(max(s2, 0.0))
-    end
-    
-    return (μ_fcl=μ_fcl, σ_fcl=σ_fcl, μ_fsb=μ_fsb, σ_fsb=σ_fsb)
-end
-
-@everywhere function run_config(n_pts::Int, N_shots::Int, seed::Int)
-    # Console output removed from here to prevent terminal flooding
-    rng = MersenneTwister(seed)
-
-    pts = [rand(rng, 3) .* 2.0 .- 1.0 for _ in 1:n_pts]
-    X_mat = hcat(pts...)   
-
-    # ─── Mode 1: Fixed N 
-    y_fix  = Vector{Float64}(undef, n_pts)
-    σ_fix  = Vector{Float64}(undef, n_pts)
-    for i in 1:n_pts
-        y_fix[i], σ_fix[i] = Q_fun(pts[i], N_shots)
-    end
-    met_fix = fit_and_metrics(X_mat, y_fix, σ_fix, MersenneTwister(seed + 100_000))
-
-    # ─── Mode 2: Adaptive N 
-    met_adp = if N_shots <= N_INIT_ADAPT
-        nothing  
-    else
-        y_p1 = Vector{Float64}(undef, n_pts)
+        y  = Vector{Float64}(undef, n_pts)
+        σy = Vector{Float64}(undef, n_pts)
         for i in 1:n_pts
-            y_p1[i], _ = Q_fun(pts[i], N_INIT_ADAPT)
+            y[i], σy[i] = Q_fun(pts[i], N_shots, rng_train)
         end
 
-        B_extra = n_pts * (N_shots - N_INIT_ADAPT)
-        var_i   = max.(y_p1 .* (1.0 .- y_p1), 1e-4)
-        weights = var_i ./ sum(var_i)
-        N_extra = max.(1, round.(Int, B_extra .* weights))
-        δ = B_extra - sum(N_extra)
-        δ != 0 && (N_extra[argmax(weights)] += δ)
+        # Fit GP once — reused for both metrics and slice predictions
+        gp = try
+            CalibrationCode.fit_heterogp(X_mat, y, σy;
+                n_restarts=4, rng=rng_gp,
+                ℓ_bounds=(0.05, 1.5), σf_bounds=(0.3, 2.0), c_bounds=(0.05, 3.0))
+        catch
+            return (; metrics=nothing, slices=nothing,
+                      n_pts=n_pts, N_shots=N_shots, seed=seed)
+        end
 
-        y_adp = Vector{Float64}(undef, n_pts)
-        σ_adp = Vector{Float64}(undef, n_pts)
-        for i in 1:n_pts
-            N_extra_i = max(N_extra[i], 0)
-            if N_extra_i > 0
-                y2, _ = Q_fun(pts[i], N_extra_i)
-                N_tot      = N_INIT_ADAPT + N_extra_i
-                y_comb     = (y_p1[i] * N_INIT_ADAPT + y2 * N_extra_i) / N_tot
-                y_adp[i]   = clamp(y_comb, 0.0, 1.0)
-                σ_adp[i]   = sqrt(y_adp[i] * (1.0 - y_adp[i]) / N_tot)
-            else
-                y_adp[i]   = y_p1[i]
-                σ_adp[i]   = sqrt(y_p1[i] * (1.0 - y_p1[i]) / N_INIT_ADAPT)
+        # ── Error metrics ────────────────────────────────────────────────────
+        d, n_tr = size(X_mat)
+        sep2  = 0.02 * 0.02
+        valid = trues(_N_TEST_w)
+        @inbounds for j in 1:n_tr
+            for i in 1:_N_TEST_w
+                valid[i] || continue
+                d2 = 0.0
+                for k in 1:d
+                    Δ = _test_mat_w[k, i] - X_mat[k, j]
+                    d2 += Δ * Δ
+                end
+                d2 < sep2 && (valid[i] = false)
             end
         end
+        n_valid = sum(valid)
 
-        fit_and_metrics(X_mat, y_adp, σ_adp, MersenneTwister(seed + 200_000))
-    end
-
-    slices_fix = nothing
-    slices_adp = nothing
-    
-    if seed == 1
-        if met_fix !== nothing
-            slices_fix = save_slices(met_fix.gp, "fixed", n_pts, N_shots)
+        metrics = nothing
+        if n_valid >= 10
+            μs = Vector{Float64}(undef, _N_TEST_w)
+            σs = Vector{Float64}(undef, _N_TEST_w)
+            @inbounds for i in 1:_N_TEST_w
+                μ, s2 = CalibrationCode.predict_latent(gp, _test_mat_w[:, i])
+                μs[i] = μ
+                σs[i] = sqrt(max(s2, 0.0))
+            end
+            m = compute_metrics(μs[valid], σs[valid],
+                                _Q_true_w[valid], _p_dd_w[valid], N_shots)
+            metrics = (; m..., n_valid=n_valid,
+                         l1=gp.ℓ[1], l2=gp.ℓ[2], l3=gp.ℓ[3],
+                         sf=gp.σf, c=gp.c)
         end
-        if met_adp !== nothing
-            slices_adp = save_slices(met_adp.gp, "adaptive", n_pts, N_shots)
-        end
-    end
 
-    return (fixed=met_fix, adaptive=met_adp, 
-            slices_fix=slices_fix, slices_adp=slices_adp,
-            n_pts=n_pts, N_shots=N_shots, seed=seed)
+        # ── 1D slices: GP prediction + noisy Q_fun sample ───────────────────
+        μ_fcl = Vector{Float64}(undef, _N_SLICE); σ_fcl = similar(μ_fcl)
+        μ_fsb = Vector{Float64}(undef, _N_SLICE); σ_fsb = similar(μ_fcl)
+        μ_amp = Vector{Float64}(undef, _N_SLICE); σ_amp = similar(μ_fcl)
+        q_fun_fcl = similar(μ_fcl)
+        q_fun_fsb = similar(μ_fcl)
+        q_fun_amp = similar(μ_fcl)
+
+        @inbounds for i in 1:_N_SLICE
+            u_f = [_slice_u[i], 0.0, 0.0]
+            u_s = [0.0, _slice_u[i], 0.0]
+            u_a = [0.0, 0.0, _slice_u[i]]
+
+            μ, s2 = CalibrationCode.predict_latent(gp, u_f)
+            μ_fcl[i] = μ; σ_fcl[i] = sqrt(max(s2, 0.0))
+            μ, s2 = CalibrationCode.predict_latent(gp, u_s)
+            μ_fsb[i] = μ; σ_fsb[i] = sqrt(max(s2, 0.0))
+            μ, s2 = CalibrationCode.predict_latent(gp, u_a)
+            μ_amp[i] = μ; σ_amp[i] = sqrt(max(s2, 0.0))
+
+            q_fun_fcl[i] = Q_fun(u_f, N_shots, rng_slice)[1]
+            q_fun_fsb[i] = Q_fun(u_s, N_shots, rng_slice)[1]
+            q_fun_amp[i] = Q_fun(u_a, N_shots, rng_slice)[1]
+        end
+
+        # q_det arrays are @everywhere const — copied into NamedTuple for transfer
+        slices = (μ_fcl=μ_fcl, σ_fcl=σ_fcl,
+                  μ_fsb=μ_fsb, σ_fsb=σ_fsb,
+                  μ_amp=μ_amp, σ_amp=σ_amp,
+                  q_det_fcl=copy(_Q_det_slice_fcl),
+                  q_det_fsb=copy(_Q_det_slice_fsb),
+                  q_det_amp=copy(_Q_det_slice_amp),
+                  q_fun_fcl=q_fun_fcl,
+                  q_fun_fsb=q_fun_fsb,
+                  q_fun_amp=q_fun_amp)
+
+        # ── Nearby training points (off-axis distance ≤ _NEAR_THRESH) ──────────
+        near_rows = Tuple{String,Float64,Float64,Float64}[]
+        for j in 1:n_pts
+            u = pts[j]
+            abs(u[2]) ≤ _NEAR_THRESH && abs(u[3]) ≤ _NEAR_THRESH &&
+                push!(near_rows, ("fcl", u[1], y[j], σy[j]))
+            abs(u[1]) ≤ _NEAR_THRESH && abs(u[3]) ≤ _NEAR_THRESH &&
+                push!(near_rows, ("fsb", u[2], y[j], σy[j]))
+            abs(u[1]) ≤ _NEAR_THRESH && abs(u[2]) ≤ _NEAR_THRESH &&
+                push!(near_rows, ("amp", u[3], y[j], σy[j]))
+        end
+
+        return (; metrics=metrics, slices=slices, near=near_rows,
+                  n_pts=n_pts, N_shots=N_shots, seed=seed)
+    end
 end
 
-# ── CSV Initializers and Helpers ──────────────────────────────────────────────
-outdir  = joinpath(@__DIR__, "data")
+# ── CSV helpers ────────────────────────────────────────────────────────────────
+outdir = joinpath(@__DIR__, "data")
 mkpath(outdir)
-outfile = joinpath(outdir, "gp_fit_quality_3d_2ms.csv")
-slice_outfile = joinpath(outdir, "slices_output.csv")
+metrics_file = joinpath(outdir, "gp_fit_quality_3d_2ms.csv")
+slices_file  = joinpath(outdir, "slices_output.csv")
+near_file    = joinpath(outdir, "train_near_output.csv")
 
-# Create Metrics File & Write Header
-_header = "mode,N_shots,n_pts,N_total,n_calls,seed," *
-          "rmse,rmse_se,rmse_corr,mae,mean_sigma," *
-          "cov80,cov90,cov95,cov95_adj," *
-          "nlpd,nlpd_adj,crps,n_valid,l1,l2,l3,sf,c"
-open(outfile, "w") do io
-    println(io, _header)
+open(metrics_file, "w") do io
+    println(io,
+        "n_pts,N_shots,N_total,seed," *
+        "rmse,rmse_se,rmse_corr,mae,mean_sigma_gp,mean_sigma_noise," *
+        "cov80,cov90,cov95,cov95_adj,nlpd,nlpd_adj,crps,msse,msse_gp," *
+        "n_valid,l1,l2,l3,sf,c")
+end
+open(slices_file, "w") do io
+    println(io, "n_pts,N_shots,seed,axis,u,mu_gp,sigma_gp,q_det,q_fun_N")
+end
+open(near_file, "w") do io
+    println(io, "n_pts,N_shots,seed,axis,u_proj,Q_obs,sig_obs")
 end
 
-function _write_row(io, mode, r, m, n_calls)
-    N_total = r.n_pts * r.N_shots
-    @printf(io, "%s,%d,%d,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6f,%d,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-        mode, r.N_shots, r.n_pts, N_total, n_calls, r.seed,
-        m.rmse, m.rmse_se, m.rmse_corr, m.mae, m.mean_sigma,
+_ns_str(N::Real) = isinf(N) ? "Inf" : string(Int(N))
+
+function _write_metrics_row(io, r, m)
+    ns = _ns_str(r.N_shots)
+    nt = isinf(r.N_shots) ? "Inf" : string(Int(r.n_pts * r.N_shots))
+    @printf(io, "%d,%s,%s,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6f,%.6f,%.6f,%d,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+        r.n_pts, ns, nt, r.seed,
+        m.rmse, m.rmse_se, m.rmse_corr, m.mae,
+        m.mean_sigma_gp, m.mean_sigma_noise,
         m.cov80, m.cov90, m.cov95, m.cov95_adj,
-        m.nlpd, m.nlpd_adj, m.crps, m.n_valid,
-        m.l1, m.l2, m.l3, m.sf, m.c)
+        m.nlpd, m.nlpd_adj, m.crps, m.msse, m.msse_gp,
+        m.n_valid, m.l1, m.l2, m.l3, m.sf, m.c)
 end
 
-# Create Slices File & Write Header
-slice_header = "mode,N_shots,n_pts,slice_axis,u,mu,sigma"
-open(slice_outfile, "w") do io
-    println(io, slice_header)
-end
-
-function write_slice(io, mode_str, r, slices)
-    slices === nothing && return
-    for (i, u) in enumerate(u_grid)
-        @printf(io, "%s,%d,%d,fcl,%.6f,%.6f,%.6f\n", mode_str, r.N_shots, r.n_pts, u, slices.μ_fcl[i], slices.σ_fcl[i])
-        @printf(io, "%s,%d,%d,fsb,%.6f,%.6f,%.6f\n", mode_str, r.N_shots, r.n_pts, u, slices.μ_fsb[i], slices.σ_fsb[i])
+function _write_near_rows(io, r)
+    isempty(r.near) && return
+    ns = _ns_str(r.N_shots)
+    for (axis, u_proj, Q_obs, sig_obs) in r.near
+        @printf(io, "%d,%s,%d,%s,%.6f,%.6f,%.6f\n",
+            r.n_pts, ns, r.seed, axis, u_proj, Q_obs, sig_obs)
     end
 end
 
-# ── Main Incremental Loop ─────────────────────────────────────────────────────
-println("\nStarting incremental GP sweep...")
+function _write_slice_rows(io, r, sl)
+    sl === nothing && return
+    np_s   = string(r.n_pts)
+    ns_s   = _ns_str(r.N_shots)
+    seed_s = string(r.seed)
+    for (axis, μv, σv, q_det_v, q_fun_v) in (
+            ("fcl", sl.μ_fcl, sl.σ_fcl, sl.q_det_fcl, sl.q_fun_fcl),
+            ("fsb", sl.μ_fsb, sl.σ_fsb, sl.q_det_fsb, sl.q_fun_fsb),
+            ("amp", sl.μ_amp, sl.σ_amp, sl.q_det_amp, sl.q_fun_amp))
+        @inbounds for i in eachindex(_slice_u_vec)
+            @printf(io, "%s,%s,%s,%s,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                np_s, ns_s, seed_s, axis,
+                _slice_u_vec[i], μv[i], σv[i], q_det_v[i], q_fun_v[i])
+        end
+    end
+end
+
+# ── Main sweep ─────────────────────────────────────────────────────────────────
+# pmap over seeds for each (n_pts, N_shots) pair so results are flushed to CSV
+# after every batch of N_SEEDS configs rather than waiting for all 1500 to finish.
+n_total = length(N_PTS_LIST) * length(N_SHOTS_LIST) * N_SEEDS
+println("\nRunning $n_total configs ($(nworkers()) workers), writing after each batch ...")
 flush(stdout)
 t_start = time()
 
-# We will collect all results here so the summary table at the end still works
-all_results = [] 
+all_results = []
 
-# Outer loop: Iterating over N_pts first ensures the heaviest workloads (1000) run last
 for n_pts in N_PTS_LIST
     for N_shots in N_SHOTS_LIST
-        println("Processing: n_pts = $(lpad(n_pts, 4)), N_shots = $(lpad(N_shots, 4)) ...")
+        t_batch = time()
+        print(@sprintf("  n_pts=%4d  N_shots=%-7s  ...", n_pts, _ns_str(N_shots)))
         flush(stdout)
-        
-        # Build the config queue for JUST this shot/point combination
+
         configs = [(n_pts, N_shots, seed) for seed in 1:N_SEEDS]
-        
-        # Distribute over workers
-        results_chunk = pmap(configs; batch_size=1) do (np, ns, s)
+        chunk   = pmap(configs; batch_size=1) do (np, ns, s)
             run_config(np, ns, s)
         end
-        
-        # Append to our master list for the final summary table
-        append!(all_results, results_chunk)
-        
-        # 1. Append Metrics immediately to CSV
-        open(outfile, "a") do io
-            for r in results_chunk
-                r.fixed    !== nothing && _write_row(io, "fixed",    r, r.fixed,    r.n_pts)
-                r.adaptive !== nothing && _write_row(io, "adaptive", r, r.adaptive, 2*r.n_pts)
+        append!(all_results, chunk)
+
+        open(metrics_file, "a") do mio
+            open(slices_file, "a") do sio
+                open(near_file, "a") do nio
+                    for r in chunk
+                        r.metrics !== nothing && _write_metrics_row(mio, r, r.metrics)
+                        r.slices  !== nothing && _write_slice_rows(sio, r, r.slices)
+                        _write_near_rows(nio, r)
+                    end
+                end
             end
         end
-        
-        # 2. Append Slices immediately to CSV (only seed == 1)
-        open(slice_outfile, "a") do io
-            for r in results_chunk
-                r.seed == 1 || continue 
-                write_slice(io, "fixed", r, r.slices_fix)
-                write_slice(io, "adaptive", r, r.slices_adp)
-            end
-        end
+
+        n_ok = count(r -> r.metrics !== nothing, chunk)
+        println(@sprintf(" done in %.1fs  (%d/%d ok)", time()-t_batch, n_ok, N_SEEDS))
+        flush(stdout)
     end
 end
 
 elapsed = round(Int, time() - t_start)
 println("\nDone in $(elapsed÷60)m$(elapsed%60)s.")
-println("Data has been incrementally saved to:")
-println("  - $outfile")
-println("  - $slice_outfile")
+println("  Metrics : $metrics_file")
+println("  Slices  : $slices_file")
+println("  Near pts: $near_file")
 
-# ── Quick summary table ───────────────────────────────────────────────────────
-for (label, field) in [("RMSE (raw)",  :rmse),
-                        ("RMSE (corr)", :rmse_corr),
-                        ("Coverage-95 (GP σ)", :cov95),
-                        ("Coverage-95 (adj σ)", :cov95_adj),
-                        ("CRPS",        :crps)]
-    println("\n=== $label — mean across seeds (fixed-N) ===")
-    println(@sprintf("%-10s", "n_pts\\N") * join([@sprintf("%8d", N) for N in N_SHOTS_LIST]))
+# ── Summary table ──────────────────────────────────────────────────────────────
+for (label, field) in [("RMSE (raw)",              :rmse),
+                       ("RMSE (corr)",              :rmse_corr),
+                       ("Coverage-95 (GP σ)",       :cov95),
+                       ("Coverage-95 (GP+noise)",   :cov95_adj),
+                       ("CRPS (GP+noise)",           :crps),
+                       ("MSSE (GP+noise, ≈1=good)", :msse),
+                       ("MSSE (GP σ only, ≈1=good)",:msse_gp)]
+    println("\n=== $label — mean across seeds ===")
+    println(@sprintf("%-10s", "n_pts\\N") *
+            join([@sprintf("%10s", _ns_str(N)) for N in N_SHOTS_LIST]))
     for n in N_PTS_LIST
         row = @sprintf("%-10d", n)
         for N in N_SHOTS_LIST
-            vals = [getfield(r.fixed, field) for r in all_results
-                    if r.n_pts == n && r.N_shots == N && r.fixed !== nothing]
-            row *= isempty(vals) ? "       —" : @sprintf("%8.4f", mean(vals))
+            vals = [getfield(r.metrics, field) for r in all_results
+                    if r.n_pts == n && r.N_shots == N && r.metrics !== nothing]
+            row *= isempty(vals) ? "         —" : @sprintf("%10.4f", mean(vals))
         end
         println(row)
     end
