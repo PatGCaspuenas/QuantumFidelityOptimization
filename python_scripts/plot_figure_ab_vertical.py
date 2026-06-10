@@ -26,7 +26,6 @@ from pathlib import Path
 # APS Plot Formatting (PRX Intelligence / PR Applied)
 # ---------------------------------------------------------------------------
 # Single column width: 3.375 inches.
-# Single column width: 3.375 inches.
 mpl.rcParams.update({
     "figure.figsize": (3.375, 4.5),  
     "font.family": "serif",          
@@ -60,7 +59,6 @@ FIGURE_DIR = REPO_ROOT
 MAX_ITER = 100
 TRACE_INFLOOR = 1e-10
 SCALE_INFLOOR = 1e-10  
-SCALE_INFLOOR = 1e-10  
 SELECTED_Y_FLOOR = 1e-7
 SCALE_DROP_FAILURES = True
 SCALE_FAILURE_Q_THRESHOLD = 0.99
@@ -70,8 +68,6 @@ MODEL_DASH_A = 0.00891668
 MODEL_DASH_ALPHA = 0.4947
 
 # Palettes
-# Generate 8 colors from magma to access distinct adjacent dark shades
-magma_colors = sns.color_palette("magma", n_colors=8).as_hex()
 # Generate 8 colors from magma to access distinct adjacent dark shades
 magma_colors = sns.color_palette("magma", n_colors=8).as_hex()
 
@@ -98,11 +94,6 @@ SCALE_GROUPS = [
 
 N_LABELS = ["100", "1000", "10000", "100000", "Inf"]
 N_COLORS = {
-    "100":    magma_colors[6], # Orange
-    "1000":   magma_colors[5], # Pink/Orange
-    "10000":  magma_colors[4], # Magenta/Purple
-    "100000": magma_colors[3], # Medium-dark Purple
-    "Inf":    magma_colors[0], # Absolute darkest
     "100":    magma_colors[6], # Orange
     "1000":   magma_colors[5], # Pink/Orange
     "10000":  magma_colors[4], # Magenta/Purple
@@ -163,7 +154,6 @@ def trace_matrix(traces, floor: float = TRACE_INFLOOR) -> np.ndarray:
 
 def full_l1_trace_dir(n_label: str) -> Path:
     return DATA_DIR / f"traces_freqspan10_bound050_full_l1_N{n_label}_nostop100_stream_100seeds"
-    return DATA_DIR / f"traces_freqspan10_bound050_full_l1_N{n_label}_nostop100_stream_100seeds"
 
 def model_dash_infid(n_label: str) -> float:
     return MODEL_DASH_EPS_INF + MODEL_DASH_A * float(n_label) ** (-MODEL_DASH_ALPHA)
@@ -177,7 +167,6 @@ def quantile_rows(matrix: np.ndarray, q: float) -> np.ndarray:
 
 def _fuzzy_gradient_fill(ax, xs, mat, color, zorder=2, smooth_sigma=None):
     """Layered quantile shading."""
-    """Layered quantile shading."""
     n_layers   = 50
     quantiles  = np.linspace(0.05, 0.45, n_layers)
     base_alpha = 0.5 / n_layers
@@ -190,11 +179,6 @@ def _fuzzy_gradient_fill(ax, xs, mat, color, zorder=2, smooth_sigma=None):
         ax.fill_between(xs, lower, upper, color=color, alpha=base_alpha,
                         linewidth=0, edgecolor="none", zorder=zorder)
 
-def style_log_axis(ax):
-    ax.set_xlim(0, MAX_ITER)
-    ax.set_ylim(1e-7, 1.0)
-    ax.set_yscale("log")
-    
 def style_log_axis(ax):
     ax.set_xlim(0, MAX_ITER)
     ax.set_ylim(1e-7, 1.0)
@@ -234,7 +218,6 @@ def draw_scale_trend(ax):
         mat = trace_matrix(traces, floor=SCALE_INFLOOR)
         q50 = quantile_rows(mat, 0.50)
         c = group["color"]
-        ls = group["ls"]
         ls = group["ls"]
 
         _fuzzy_gradient_fill(ax, xs, mat, color=c)
@@ -294,15 +277,13 @@ def add_side_title(ax, leg, text):
 def main():
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Use gridspec_kw to make ax_selected (bottom) taller than ax_scale (top)
     fig, (ax_scale, ax_selected) = plt.subplots(
         2, 1,
-        gridspec_kw={'height_ratios': [1, 1]},
         gridspec_kw={'height_ratios': [1, 1]},
         constrained_layout=False,
     )
     
-    fig.subplots_adjust(left=0.20, right=0.95, top=0.92, bottom=0.15, hspace=0.1)
+    fig.subplots_adjust(left=0.25, right=0.85, top=0.95, bottom=0.1, hspace=0.1)
 
     # -----------------------------------------------------------------------
     # PANEL A: SCALE TREND
@@ -327,7 +308,7 @@ def main():
     # Legend A 
     leg_a = ax_scale.legend(handles_a, labels_a, loc="upper right", bbox_to_anchor=(0.99, 0.99), 
                             frameon=True, edgecolor="black", facecolor="white", 
-                            fancybox=False, handlelength=2, labelspacing=0.2)
+                            fancybox=False, handlelength=1.5, labelspacing=0.2)
     add_side_title(ax_scale, leg_a, r"$r$")
 
 
@@ -386,7 +367,7 @@ def main():
 
     # Output
     out = FIGURE_DIR / "figure_ab_vertical.pdf"
-    plt.savefig(out, bbox_inches="tight")
+    plt.savefig(out)
     print(f"Saved → {out}")
 
 if __name__ == "__main__":
