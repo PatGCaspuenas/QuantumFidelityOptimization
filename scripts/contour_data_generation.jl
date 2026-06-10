@@ -19,9 +19,9 @@ using Printf
 
 const REPO_ROOT = normpath(joinpath(@__DIR__, ".."))
 const DATA_DIR = joinpath(REPO_ROOT, "data")
-const METADATA_PATH = joinpath(DATA_DIR, "jacobian_probe_metadata.csv")
 const OUTPUT_METADATA_PATH = joinpath(DATA_DIR, "varms_probe_metadata.csv")
 const TWO_PI_KHZ = 2pi * 1.0e3
+const T_US = 100.0
 
 function env_int(name::String, default::Int)
     raw = get(ENV, name, string(default))
@@ -36,7 +36,7 @@ end
 
 const N_WORKERS = env_int("VARMS_SCAN_WORKERS", max(1, Sys.CPU_THREADS - 1))
 const N_HEATMAP = env_int("VARMS_HEATMAP_N", 31)
-const NUM_MS_VALUES = (1, 2)
+const NUM_MS_VALUES = (2,)
 const HEATMAP_PAIRS = (
     (:rabi, :sideband),
     (:rabi, :phase),
@@ -202,13 +202,13 @@ end
     f_cl = _VARMS_F_CL0 + Float64(job.fcl_2pi_khz) * _VARMS_TWO_PI_KHZ
     f_sb = _VARMS_F_SB0 + Float64(job.sideband_2pi_khz) * _VARMS_TWO_PI_KHZ
     subgates = [CalibrationCode.MSSubgate(pi / 2, 0.0) for _ in 1:Int(job.numMS)]
+    A = _VARMS_I_PI2 * Float64(job.rabi_ratio)
     pulses = CalibrationCode.build_closed_loop_ms_sequence(
         _VARMS_T_US,
         f_cl,
         f_sb,
-        _VARMS_I_PI2,
+        A,
         subgates;
-        omega_ratio=Float64(job.rabi_ratio),
         relative_phase=Float64(job.phase_pi) * pi,
     )
     probs = _varms_normalized_populations(CalibrationCode.populations_ms_sequence(pulses))
@@ -227,14 +227,13 @@ function run_jobs(jobs)
     return [Dict(string(key) => value for (key, value) in pairs(row)) for row in results]
 end
 
-optimizer_score(row, nominal) =
-    clamp(1.0 - abs(row["gg"] - nominal["gg"]) - abs(row["ee"] - nominal["ee"]), 0.0, 1.0)
+optimizer_score(row) = clamp(Float64(row["ee"]), 0.0, 1.0)
 
 function add_score_columns!(rows, nominal)
     for row in rows
         row["nominal_gg"] = nominal["gg"]
         row["nominal_ee"] = nominal["ee"]
-        row["score"] = optimizer_score(row, nominal)
+        row["score"] = optimizer_score(row)
     end
     return rows
 end
@@ -274,12 +273,11 @@ const COLUMNS = [
 ]
 
 function main()
-    isfile(METADATA_PATH) || error("Missing metadata file: $METADATA_PATH. Run scripts/export_jacobian_probe_data.jl first.")
-    metadata = read_generated_csv(METADATA_PATH)
-    t_us = metadata_value(metadata, "t_us")
-    f_cl0 = metadata_value(metadata, "f_cl0")
-    f_sb0 = metadata_value(metadata, "f_sb0")
-    i_pi2 = metadata_value(metadata, "I_pi2_calibrated")
+    base = CalibrationCode.ideal(T_US)
+    t_us = T_US
+    f_cl0 = Float64(base.f_cl)
+    f_sb0 = Float64(base.f_sb)
+    i_pi2 = Float64(base.A)
 
     @everywhere const _VARMS_T_US = $t_us
     @everywhere const _VARMS_F_CL0 = $f_cl0
