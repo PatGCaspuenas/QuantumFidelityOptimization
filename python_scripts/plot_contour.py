@@ -55,14 +55,15 @@ NUM_MS = int(os.environ.get("PLOT_NUM_MS", "2"))
 N_LEVELS = 20
 CMAP = "magma"
 
-# Three axis pairs shown in the paper figure
+# Three axis pairs: (x_axis, y_axis) — left to right
+# (a) x=Δω_cl, y=Δδ   (b) x=Δδ, y=Ω   (c) x=Δω_cl, y=Ω
 AXIS_PAIRS = [
-    ("rabi", "sideband"),
-    ("rabi", "fcl"),
-    ("sideband", "fcl"),
+    ("fcl",      "sideband"),   # (a)
+    ("sideband", "rabi"),       # (b)
+    ("fcl",      "rabi"),       # (c)
 ]
 
-PANEL_LABELS = ["(a)", "(b)", "(c)"]
+PANEL_LABELS = [r"\textbf{a)}", r"\textbf{b)}", r"\textbf{c)}"]
 
 # ---------------------------------------------------------------------------
 # Axis helpers
@@ -80,8 +81,8 @@ def axis_column(axis):
 def axis_label(axis):
     return {
         "rabi":     r"$\Omega / \Omega_\mathrm{opt}$",
-        "sideband": r"$\Delta f_\mathrm{sb}\ (\mathrm{kHz})$",
-        "fcl":      r"$\Delta f_\mathrm{cl}\ (\mathrm{kHz})$",
+        "sideband": r"$\Delta \delta\ (\mathrm{kHz})$",
+        "fcl":      r"$\Delta \omega_\mathrm{cl}\ (\mathrm{kHz})$",
         "phase":    r"$\Delta\phi / \pi$",
     }[axis]
 
@@ -113,54 +114,50 @@ def axis_ticks(axis):
 # ---------------------------------------------------------------------------
 
 def read_heatmap(num_ms, axis_x, axis_y):
-    path = DATA_DIR / f"varms_{num_ms}_heatmap_{axis_x}_{axis_y}.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing heatmap: {path}")
-    rows = []
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row.get("scan_kind", "heatmap") != "heatmap":
-                continue
-            rows.append(row)
-    if not rows:
-        raise ValueError(f"No heatmap rows found in {path}")
-    return rows
+    """Load heatmap rows; tries both (axis_x, axis_y) and reversed file names."""
+    for a, b in [(axis_x, axis_y), (axis_y, axis_x)]:
+        path = DATA_DIR / f"varms_{num_ms}_heatmap_{a}_{b}.csv"
+        if path.exists():
+            rows = []
+            with open(path, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row.get("scan_kind", "heatmap") == "heatmap":
+                        rows.append(row)
+            if rows:
+                return rows
+    raise FileNotFoundError(
+        f"Missing heatmap for {axis_x}/{axis_y} (tried both orderings)")
 
 
 def make_grid(rows, axis_x, axis_y):
-    """Reconstruct the regular 2D grid from the flat CSV row list."""
-    col_x = axis_column(axis_x)
-    col_y = axis_column(axis_y)
-
+    """Build a regular 2D grid with axis_x on the x-axis and axis_y on the y-axis.
+    Works regardless of which file ordering was found."""
+    col_x  = axis_column(axis_x)
+    col_y  = axis_column(axis_y)
     scale_x = FREQ_SCALE if axis_x in ("sideband", "fcl") else 1.0
     scale_y = FREQ_SCALE if axis_y in ("sideband", "fcl") else 1.0
 
     xs     = np.array([float(r[col_x]) * scale_x for r in rows])
     ys     = np.array([float(r[col_y]) * scale_y for r in rows])
-    scores = np.array([float(r["score"])    for r in rows])
-    xi     = np.array([int(r["x_index"])    for r in rows])
-    yi     = np.array([int(r["y_index"])    for r in rows])
+    scores = np.array([float(r["score"])          for r in rows])
 
-    n_x = xi.max()
-    n_y = yi.max()
+    x_uniq = np.sort(np.unique(xs))
+    y_uniq = np.sort(np.unique(ys))
 
-    X = np.empty((n_y, n_x))
-    Y = np.empty((n_y, n_x))
-    Z = np.empty((n_y, n_x))
+    Z = np.full((len(y_uniq), len(x_uniq)), np.nan)
+    for x, y, s in zip(xs, ys, scores):
+        ix = np.searchsorted(x_uniq, x)
+        iy = np.searchsorted(y_uniq, y)
+        Z[iy, ix] = s
 
-    for x, y, s, ix, iy in zip(xs, ys, scores, xi, yi):
-        X[iy - 1, ix - 1] = x
-        Y[iy - 1, ix - 1] = y
-        Z[iy - 1, ix - 1] = s
-
+    X, Y = np.meshgrid(x_uniq, y_uniq)
     return X, Y, Z
 
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
-def draw_panel(ax, axis_x, axis_y, num_ms, panel_label):
+def draw_panel(ax, axis_x, axis_y, num_ms):
     rows = read_heatmap(num_ms, axis_x, axis_y)
     X, Y, Z = make_grid(rows, axis_x, axis_y)
 
@@ -185,53 +182,39 @@ def draw_panel(ax, axis_x, axis_y, num_ms, panel_label):
     ax.set_ylabel(axis_label(axis_y))
     ax.tick_params(which="both", direction="in", top=True, right=True)
 
-    ax.text(0.04, 0.95, panel_label,
-            transform=ax.transAxes,
-            ha="left", va="top",
-            fontsize=9, fontweight="bold", color="white")
-
     return cf
 
 def main():
     FIGURE_DIR.mkdir(parents=True, exist_ok=True)
 
-    n_panels = len(AXIS_PAIRS)
-    
-    # 1. Set exact APS width (6.75) and a balanced height (2.5)
-    # 2. Reduced wspace to 0.25 since the y-tick numbers are gone, keeping it tight
-    fig, all_axes = plt.subplots(
-        1, n_panels + 1, 
-        figsize=(6.75, 2.4), 
-        constrained_layout=False,
-        gridspec_kw={'width_ratios': [1, 1, 1, 0.08], 'wspace': 0.25}
-    )
-    
-    # Adjust margins 
-    fig.subplots_adjust(left=0.08, right=0.92, top=0.92, bottom=0.22)
+    fig = plt.figure(figsize=(7.4, 2.4))
 
-    axes = all_axes[:3]
-    cbar_ax = all_axes[3]
+    # Manual axes positions [x0, y0, width, height] in figure fraction.
+    # All three panels share identical width W so the layout is symmetric.
+    y0, h = 0.22, 0.70   # bottom / height
+    W     = 0.21          # panel width (figure fraction)
+    # x0 positions:  (a) at 0.11 | gap 0.08 | (b) at 0.40 | gap 0.05 | (c) at 0.66
+    # colorbar tight to (c): gap 0.01, width W*0.08
+    ax_a    = fig.add_axes([0.11, y0, W,        h])
+    ax_b    = fig.add_axes([0.40, y0, W,        h])
+    ax_c    = fig.add_axes([0.66, y0, W,        h])
+    cbar_ax = fig.add_axes([0.88, y0, W * 0.08, h])
+    axes    = [ax_a, ax_b, ax_c]
 
     cf_last = None
     for i, (ax, (axis_x, axis_y), label) in enumerate(zip(axes, AXIS_PAIRS, PANEL_LABELS)):
         try:
-            cf_last = draw_panel(ax, axis_x, axis_y, NUM_MS, label)
-            
-            # Hide y-tick numbers for panels (b) and (c), but KEEP the ylabel
-            if i in [1, 2]:
-                ax.tick_params(labelleft=False)
-                
-            # ELEGANT FIX: Shift the extreme labels to prevent corner collisions
-            fig.canvas.draw_idle() 
-            
-            # 1. Fix horizontal overlaps on the x-axis
-            x_labels = ax.get_xticklabels()
+            cf_last = draw_panel(ax, axis_x, axis_y, NUM_MS)
 
-            # 2. Fix the vertical overlap in the bottom-left corner of panel (a)
-            if i == 0:
-                y_labels = ax.get_yticklabels()
-                if len(y_labels) > 1:
-                    y_labels[0].set_verticalalignment('bottom') # Shifts the '-2' UP slightly
+            # Hide y-tick labels only for panel (c); show for (a) and (b)
+            if i == 2:
+                ax.tick_params(labelleft=False)
+
+            # Panel letter outside-left; panels with ytick labels need more offset
+            x_off = -0.22 if i < 2 else -0.08
+            ax.text(x_off, 1.0, label,
+                    transform=ax.transAxes, ha="right", va="top",
+                    fontsize=10, fontweight="bold", color="black", clip_on=False)
 
             print(f"  Panel {label}: varms_{NUM_MS} {axis_x}/{axis_y} — OK")
         except FileNotFoundError as e:
@@ -250,3 +233,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
