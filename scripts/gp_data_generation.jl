@@ -73,11 +73,11 @@ const LABELS = Dict(
 function trace_dir(score_mode::Symbol, n_label::String)
     if score_mode == :odd_penalty
         if n_label == "Inf"
-            return joinpath(DATA_DIR, "traces_freqspan10_bound050_NInf_lhs12_restart_fullbudget100_40seeds")
+            return joinpath(DATA_DIR, "traces_freqspan10_bound050_NInf_lhs12_restart_fullbudget100_100seeds")
         end
-        return joinpath(DATA_DIR, "traces_freqspan10_bound050_N$(n_label)_nostop100_stream_40seeds")
+        return joinpath(DATA_DIR, "traces_freqspan10_bound050_N$(n_label)_nostop100_stream_100seeds")
     end
-    return joinpath(DATA_DIR, "traces_freqspan10_bound050_full_l1_N$(n_label)_nostop100_stream_40seeds")
+    return joinpath(DATA_DIR, "traces_freqspan10_bound050_full_l1_N$(n_label)_nostop100_stream_100seeds")
 end
 
 n_value(n_label::String) = n_label == "Inf" ? Inf : parse(Int, n_label)
@@ -401,7 +401,7 @@ function fit_snapshot_gp(n_label::String, seed::Int, snapshot_iter::Int)
         jitter=1e-8,
         rng=rng,
     )
-    return gp, size(X, 2)
+    return gp, size(X, 2), X, y, sigma_y
 end
 
 function predict_axis(gp, axis::Symbol)
@@ -432,12 +432,14 @@ function gp_csv_paths()
     return (
         gp=joinpath(GP_SLICE_DIR, "$stem.csv"),
         selected=joinpath(GP_SLICE_DIR, "$(stem)_selected_seeds.csv"),
+        training=joinpath(GP_SLICE_DIR, "$(stem)_training_points.csv"),
     )
 end
 
 function collect_gp_slice_rows()
     output_rows = NamedTuple[]
     selected_rows = NamedTuple[]
+    training_rows = NamedTuple[]
     for n_label in N_LABELS
         selected, med, dir = selected_seed_rows(n_label)
         @printf("%s: median final score %.8f; selected seeds %s\n",
@@ -455,7 +457,22 @@ function collect_gp_slice_rows()
             for iter in DATA_SNAPSHOT_ITERS
                 @printf("  %s seed %d rank %d: fitting GP at n=%d\n",
                         LABELS[n_label], info.seed, rank, iter)
-                gp, n_train = fit_snapshot_gp(n_label, info.seed, iter)
+                gp, n_train, X_train, y_train, sigma_train = fit_snapshot_gp(n_label, info.seed, iter)
+                for j in 1:n_train
+                    push!(training_rows, (
+                        score_mode=String(SCORE_MODE),
+                        N=n_label,
+                        seed=info.seed,
+                        selected_rank=rank,
+                        iter=iter,
+                        point_idx=j,
+                        x_u1=X_train[1, j],
+                        x_u2=X_train[2, j],
+                        x_u3=X_train[3, j],
+                        y=y_train[j],
+                        sigma_y=sigma_train[j],
+                    ))
+                end
                 for axis in AXES
                     for row in predict_axis(gp, axis)
                         push!(output_rows, (
@@ -481,8 +498,10 @@ function collect_gp_slice_rows()
     mkpath(GP_SLICE_DIR)
     write_namedtuple_csv(paths.gp, output_rows)
     write_namedtuple_csv(paths.selected, selected_rows)
+    write_namedtuple_csv(paths.training, training_rows)
     println("Saved GP slice data: $(paths.gp)")
     println("Saved selected seed table: $(paths.selected)")
+    println("Saved training points: $(paths.training)")
     return output_rows, selected_rows
 end
 
@@ -594,7 +613,7 @@ function main()
     true_rows = load_or_write_true_score_cache()
     true_lookup = true_score_by_axis(true_rows)
     paths = gp_csv_paths()
-    if isfile(paths.gp) && isfile(paths.selected) &&
+    if isfile(paths.gp) && isfile(paths.selected) && isfile(paths.training) &&
        lowercase(get(ENV, "RECOMPUTE_SELECTEDN_GP_SLICES", "false")) ∉ ("1", "true", "yes", "on")
         println("Loaded GP slice data: $(paths.gp)")
     else
