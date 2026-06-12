@@ -100,8 +100,8 @@ AXES_1D  = ["fcl", "fsb", "amp"]
 PAIRS_2D = [("fcl", "fsb"), ("fsb", "amp"), ("fcl", "amp")]
 
 AXIS_LABELS = {
-    "fcl": r"$\Delta \omega_\mathrm{cl}\ (\mathrm{kHz})$",
-    "fsb": r"$\Delta \delta\ (\mathrm{kHz})$",
+    "fcl": r"$\Delta \omega_\mathrm{cl}\ (2\pi \cdot \mathrm{kHz})$",
+    "fsb": r"$\Delta \delta\ (2\pi \cdot \mathrm{kHz})$",
     "amp": r"$\Omega / \Omega_\mathrm{opt}$",
 }
 AXIS_LIMS = {
@@ -497,7 +497,7 @@ def main():
     # col2=[it2,sigma] → handles order: it0, Qdet, it1, mu, it2, sigma.
     leg_handles = [
         Line2D([0],[0], color=COLORS_GP[0], lw=1.5, label=rf"${ITER_GPS[0]}$"),
-        Line2D([0],[0], color="gray", lw=1.5, ls="--", label=r"$Q_\mathrm{det}$"),
+        Line2D([0],[0], color="gray", lw=1.5, ls="--", label=r"$Q(N=\infty)$"),
         Line2D([0],[0], color=COLORS_GP[1], lw=1.5, label=rf"${ITER_GPS[1]}$"),
         Line2D([0],[0], color="gray", lw=1.5,          label=r"$\hat{\mu}$"),
         Line2D([0],[0], color=COLORS_GP[2], lw=1.5, label=rf"${ITER_GPS[2]}$"),

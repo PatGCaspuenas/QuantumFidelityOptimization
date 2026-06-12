@@ -207,7 +207,8 @@ def style_log_axis(ax):
 def draw_scale_trend(ax):
     xs = np.arange(1, MAX_ITER + 1)
     handles = {}
-    
+    ref_val = None   # final q50 of r=0.1 group
+
     for group in SCALE_GROUPS:
         try:
             traces = read_trace_group(group["dir"], drop_failures=SCALE_DROP_FAILURES)
@@ -224,9 +225,15 @@ def draw_scale_trend(ax):
         line, = ax.plot(xs, q50, color=c, linestyle=ls, zorder=4)
         handles[group["label"]] = line
 
+        if group["label"] == "0.1":
+            ref_val = q50[79]   # median at iteration 80 (index 79)
+
         print(f"  {group['label']}: {mat.shape[0]} traces, final median {q50[-1]:.6g}")
 
     style_log_axis(ax)
+
+    if ref_val is not None:
+        ax.axhline(ref_val, color="0.35", ls="-.", lw=1.2, zorder=5)
     return handles
 
 
@@ -298,10 +305,11 @@ def main():
             handles_a.append(h_a_dict[g["label"]])
             labels_a.append(g["label"])
 
-    ax_scale.set_ylabel(r"$1 - Q_{det}(\bm{x}_n^*)$")
+    ax_scale.set_ylabel(r"$1 - Q(\bm{x}_n^*)$")
     ax_scale.set_xlabel("")
     ax_scale.set_xticklabels([])
-    ax_scale.text(0.03, 0.05, r"\textbf{a)}", transform=ax_scale.transAxes, ha="left", va="bottom", fontsize=9)
+    ax_scale.text(-0.18, 1.0, r"\textbf{a)}", transform=ax_scale.transAxes,
+                  ha="right", va="top", fontsize=10, fontweight="bold", clip_on=False)
     ax_scale.set_ylim([1e-7, 1.0])
     ax_scale.set_yticks([1e-6, 1e-4, 1e-2, 1.0])
 
@@ -337,9 +345,10 @@ def main():
         "",
     ]
 
-    ax_selected.set_ylabel(r"$1 - Q_{det}(\bm{x}_n^*)$")
+    ax_selected.set_ylabel(r"$1 - Q(\bm{x}_n^*)$")
     ax_selected.set_xlabel(r"$n$")
-    ax_selected.text(0.03, 0.05, r"\textbf{b)}", transform=ax_selected.transAxes, ha="left", va="bottom", fontsize=9)
+    ax_selected.text(-0.18, 1.0, r"\textbf{b)}", transform=ax_selected.transAxes,
+                     ha="right", va="top", fontsize=10, fontweight="bold", clip_on=False)
     ax_selected.set_ylim([1e-7, 1.0])
     ax_selected.set_yticks([1e-6, 1e-4, 1e-2, 1.0])
     

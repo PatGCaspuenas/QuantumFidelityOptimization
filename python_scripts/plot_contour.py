@@ -81,8 +81,8 @@ def axis_column(axis):
 def axis_label(axis):
     return {
         "rabi":     r"$\Omega / \Omega_\mathrm{opt}$",
-        "sideband": r"$\Delta \delta\ (\mathrm{kHz})$",
-        "fcl":      r"$\Delta \omega_\mathrm{cl}\ (\mathrm{kHz})$",
+        "sideband": r"$\Delta \delta\ (2\pi \cdot \mathrm{kHz})$",
+        "fcl":      r"$\Delta \omega_\mathrm{cl}\ (2\pi \cdot \mathrm{kHz})$",
         "phase":    r"$\Delta\phi / \pi$",
     }[axis]
 
