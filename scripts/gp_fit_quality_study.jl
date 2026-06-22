@@ -34,6 +34,7 @@ end
 # Matches optimization_data_generation.jl: TRACE_FREQ_SPAN_KHZ=10, TRACE_BOUND_SCALE=0.5
 const FREQ_SPAN_KHZ = 10.0
 const BOUND_SCALE   = 0.5
+const NEAR_THRESH   = 0.1   # off-axis proximity for training-point overlay
 
 t = 100.0
 base = CalibrationCode.ideal(t)
@@ -111,8 +112,7 @@ const N_PTS_LIST   = [10, 50, 100, 250, 500, 1000]
 const N_SHOTS_LIST = [100, 1000, 10000, 100000, Inf]
 const N_SEEDS = parse(Int, get(ENV, "GP_STUDY_N_SEEDS", "50"))
 const N_TEST  = parse(Int, get(ENV, "GP_STUDY_N_TEST",  "5000"))
-const N_SLICE    = 100
-const NEAR_THRESH = 0.1   # off-axis proximity for training-point overlay
+const N_SLICE = 100
 
 println("GP fit quality study — full_l1 score, FREQ_SPAN=$(FREQ_SPAN_KHZ) kHz, BOUND=$(BOUND_SCALE)")
 println("  N_pts    : $N_PTS_LIST")
