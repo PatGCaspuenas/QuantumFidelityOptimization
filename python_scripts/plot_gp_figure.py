@@ -24,6 +24,7 @@ import sys
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as mgridspec
 import matplotlib.ticker as mticker
 import matplotlib.transforms as mtransforms
 from matplotlib.lines import Line2D
@@ -102,7 +103,7 @@ PAIRS_2D = [("fcl", "fsb"), ("fsb", "amp"), ("fcl", "amp")]
 AXIS_LABELS = {
     "fcl": r"$\Delta \omega_\mathrm{cl}\ (2\pi \cdot \mathrm{kHz})$",
     "fsb": r"$\Delta \delta\ (2\pi \cdot \mathrm{kHz})$",
-    "amp": r"$\Omega / \Omega_\mathrm{opt}$",
+    "amp": r"$\Omega / \Omega^*$",
 }
 AXIS_LIMS = {
     "fcl": (-5.0, 5.0),
@@ -138,9 +139,9 @@ HEATMAP_MAP = {
 }
 TRUE_CONTOUR_LEVELS = [0.2, 0.4, 0.6, 0.8, 0.9, 0.95]
 
-PANEL_LABELS = [[r"\textbf{a)}", r"\textbf{b)}", r"\textbf{c)}"],
-                [r"\textbf{d)}", r"\textbf{e)}", r"\textbf{f)}"],
-                [r"\textbf{g)}", r"\textbf{h)}", r"\textbf{i)}"]]
+PANEL_LABELS = [[r"\textbf{a)}", r"\textbf{b)}"],
+                [r"\textbf{c)}", r"\textbf{d)}"],
+                [r"\textbf{e)}", r"\textbf{f)}"],]
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -380,8 +381,9 @@ def draw_1d_slice(ax, axis, true_data, gp_data, train_pts, show_ylabel):
                             zorder=10, transform=trans, clip_on=False)
 
     ax.set_xlim(*AXIS_LIMS[axis])
-    ax.set_ylim(0., 1.0)
-    
+    ax.set_ylim(0.5, 1.0)
+    ax.set_yticks([0.5, 0.75, 1.0])
+
     if show_ylabel:
         ax.set_ylabel(r"$Q$")
     else:
@@ -392,7 +394,7 @@ def draw_1d_slice(ax, axis, true_data, gp_data, train_pts, show_ylabel):
     if axis in ["fcl", "fsb"]:
         ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
 
-def draw_2d_scatter(ax, data, ax_x, ax_y, col_idx, is_bottom_row, scatter_color, hide_ylabels=False, hide_yticklabels=False):
+def draw_2d_scatter(ax, data, ax_x, ax_y, col_idx, is_bottom_row, scatter_color, hide_ylabels=False, hide_yticklabels=False, contour_levels=None):
     # Add Gridlines
     ax.grid(True, which="major", color="#cccccc", linestyle=":", linewidth=0.8, zorder=0)
 
@@ -414,9 +416,11 @@ def draw_2d_scatter(ax, data, ax_x, ax_y, col_idx, is_bottom_row, scatter_color,
         ax.scatter(xp, yp, s=2.5, color=scatter_color, alpha=0.12, edgecolors="none", zorder=1)
 
     # Overlaid True score contour lines
+    if contour_levels is None:
+        contour_levels = TRUE_CONTOUR_LEVELS
     try:
         x_bg, y_bg, z_bg = load_contour_2d(ax_x, ax_y)
-        cs = ax.tricontour(x_bg, y_bg, z_bg, levels=TRUE_CONTOUR_LEVELS,
+        cs = ax.tricontour(x_bg, y_bg, z_bg, levels=contour_levels,
                            colors="#555555", linewidths=0.45, linestyles="-", alpha=0.85, zorder=3)
         ax.clabel(cs, inline=True, fontsize=7, fmt="%.2f")
     except (FileNotFoundError, KeyError) as e:
@@ -459,37 +463,63 @@ def main():
 
     true_data = load_true_score()
     gp_data   = load_gp_slices()
-    train_pts = load_training_points()
     acq_data, rec_data = load_all_traces(N_FOCUS)
 
-    # Tight vertical layout because x-labels are shared. Generous wspace to fit all the Y-labels.
-    fig, axes = plt.subplots(3, 3, figsize=(6.75, 5.8), constrained_layout=False)
-    fig.subplots_adjust(left=0.08, right=0.96, top=0.88, bottom=0.08, hspace=0.10, wspace=0.30)
+    # 3×2 layout: row 1 shows fsb and amp slices; rows 2&3 show (fsb,fcl) and (amp,fcl)
+    # so that δ and Ω land on the x-axis (transposed from original cols 0 & 2).
+    ROW1_AXES   = ["fsb", "amp"]
+    ROW23_PAIRS = [("fsb", "fcl"), ("amp", "fcl")]
 
-    # Row 1: 1D GP slices
-    for col, axis in enumerate(AXES_1D):
+    # Nested GridSpec: row 1 separated from the 2×2 block; rows 2&3 share the
+    # same column width as row 1 (wspace=0.42 in both) and are flush vertically.
+    fig_w = 3.375
+    fig = plt.figure(figsize=(fig_w, 4.75))
+    gs_outer = mgridspec.GridSpec(
+        2, 1, figure=fig,
+        left=0.17, right=0.88, top=0.87, bottom=0.08,
+        height_ratios=[0.60, 1.7], hspace=0.12,
+    )
+    gs_r1  = mgridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs_outer[0],
+                                               wspace=0.42)
+    gs_r23 = mgridspec.GridSpecFromSubplotSpec(2, 2, subplot_spec=gs_outer[1],
+                                               hspace=0.12, wspace=0.42)
+    axes = np.array([
+        [fig.add_subplot(gs_r1[0, 0]),   fig.add_subplot(gs_r1[0, 1])],
+        [fig.add_subplot(gs_r23[0, 0]),  fig.add_subplot(gs_r23[0, 1])],
+        [fig.add_subplot(gs_r23[1, 0]),  fig.add_subplot(gs_r23[1, 1])],
+    ])
+
+    # Row 1: 1D GP slices (fsb and amp only; rug marks omitted)
+    for col, axis in enumerate(ROW1_AXES):
         ax = axes[0, col]
-        draw_1d_slice(ax, axis, true_data, gp_data, train_pts, show_ylabel=(col == 0))
-        add_panel_label(ax, PANEL_LABELS[0][col], x=(-0.18 if col == 1 else -0.15))
-    
-    # Row 2: Acquisition scatter
-    for col, (ax_x, ax_y) in enumerate(PAIRS_2D):
+        draw_1d_slice(ax, axis, true_data, gp_data, None, show_ylabel=(col == 0))
+        add_panel_label(ax, PANEL_LABELS[0][col], x=(-0.30 if col == 0 else -0.10))
+
+    # Rows 2 & 3: 2D scatter with box (square) aspect ratio
+    _levels_col1 = [l for l in TRUE_CONTOUR_LEVELS if l != 0.9]
+
+    for col, (ax_x, ax_y) in enumerate(ROW23_PAIRS):
+        hide_ylabels = (col != 0)
+        levels = _levels_col1 if col == 1 else None
+
+        # Row 2: acquisition samples
         ax = axes[1, col]
         draw_2d_scatter(ax, acq_data, ax_x, ax_y, col, is_bottom_row=False,
-                        scatter_color="#005AB5", hide_yticklabels=(col == 2))
-        add_panel_label(ax, PANEL_LABELS[1][col], x=(-0.18 if col == 1 else -0.15))
-        if col == 2:
-            ax.text(1.05, 0.5, r"samples ($\bm{x}_{n}$)", transform=ax.transAxes,
+                        scatter_color="#005AB5", hide_ylabels=hide_ylabels,
+                        contour_levels=levels)
+        add_panel_label(ax, PANEL_LABELS[1][col], x=(-0.30 if col == 0 else -0.10))
+        if col == 1:
+            ax.text(1.08, 0.5, r"samples ($\bm{x}_{n}$)", transform=ax.transAxes,
                     rotation=-90, va="center", ha="left", fontsize=10, fontweight="bold")
 
-    # Row 3: Recommended-max scatter
-    for col, (ax_x, ax_y) in enumerate(PAIRS_2D):
+        # Row 3: recommended best point
         ax = axes[2, col]
         draw_2d_scatter(ax, rec_data, ax_x, ax_y, col, is_bottom_row=True,
-                        scatter_color="#E05C5C", hide_yticklabels=(col == 2))
-        add_panel_label(ax, PANEL_LABELS[2][col], x=(-0.18 if col == 1 else -0.15))
-        if col == 2:
-            ax.text(1.05, 0.5, r"estimated max ($\bm{x}_n^*$)", transform=ax.transAxes,
+                        scatter_color="#E05C5C", hide_ylabels=hide_ylabels,
+                        contour_levels=levels)
+        add_panel_label(ax, PANEL_LABELS[2][col], x=(-0.30 if col == 0 else -0.10))
+        if col == 1:
+            ax.text(1.08, 0.5, r"estimated max ($\bm{x}_n^*$)", transform=ax.transAxes,
                     rotation=-90, va="center", ha="left", fontsize=10, fontweight="bold")
 
     # Two-row legend (ncol=3).  Matplotlib fills column-major (top-to-bottom per
@@ -497,17 +527,16 @@ def main():
     # col2=[it2,sigma] → handles order: it0, Qdet, it1, mu, it2, sigma.
     leg_handles = [
         Line2D([0],[0], color=COLORS_GP[0], lw=1.5, label=rf"${ITER_GPS[0]}$"),
-        Line2D([0],[0], color="gray", lw=1.5, ls="--", label=r"$Q(N=\infty)$"),
+        Line2D([0],[0], color="gray", lw=1.5, ls="--", label=r"$Q_\mathrm{ideal}$"),
         Line2D([0],[0], color=COLORS_GP[1], lw=1.5, label=rf"${ITER_GPS[1]}$"),
         Line2D([0],[0], color="gray", lw=1.5,          label=r"$\hat{\mu}$"),
         Line2D([0],[0], color=COLORS_GP[2], lw=1.5, label=rf"${ITER_GPS[2]}$"),
         Patch(facecolor="gray", alpha=0.35, edgecolor="none",
               label=r"$\hat{\sigma}$"),
     ]
-    leg = fig.legend(handles=leg_handles, loc="upper center", bbox_to_anchor=(0.54, 0.99),
+    leg = fig.legend(handles=leg_handles, loc="upper center", bbox_to_anchor=(0.55, 0.99),
                      ncol=3, frameon=True, edgecolor="black", fancybox=False,
                      fontsize=9, handlelength=1.8, handletextpad=0.4, columnspacing=0.9)
-    # Place "n" outside the legend box to the left, vertically centred with row 1
     fig.canvas.draw()
     leg_bb      = leg.get_window_extent()
     fig_w_px    = fig.get_figwidth()  * fig.dpi
@@ -518,7 +547,7 @@ def main():
              fontsize=9, ha="right", va="center")
 
     out = FIGURE_DIR / f"figure_fcl_amp_n{N_FOCUS}_gpzoom.pdf"
-    plt.savefig(out, bbox_inches="tight")
+    plt.savefig(out)
     print(f"Saved -> {out}")
 
 if __name__ == "__main__":
