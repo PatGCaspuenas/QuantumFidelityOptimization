@@ -1,4 +1,43 @@
-figures/
+figures/*
 *.bak
 *.png
 *.gif
+others/
+docs/
+.claude/
+.venv/
+data/*
+
+# BO trace data (scale sweep + selected-N full_l1)
+!data/traces_freqspan10_bound010_NInf_lhs12_restart_fullbudget_40seeds/
+!data/traces_freqspan10_bound050_NInf_lhs12_restart_fullbudget100_40seeds/
+!data/traces_freqspan10_bound100_NInf_lhs12_restart_fullbudget100_40seeds/
+!data/traces_freqspan10_bound050_full_l1_N100_nostop100_stream_40seeds/
+!data/traces_freqspan10_bound050_full_l1_N1000_nostop100_stream_40seeds/
+!data/traces_freqspan10_bound050_full_l1_N10000_nostop100_stream_40seeds/
+!data/traces_freqspan10_bound050_full_l1_N100000_nostop100_stream_40seeds/
+!data/traces_freqspan10_bound050_full_l1_NInf_nostop100_stream_40seeds/
+
+# GP-slice cache (single file inside an otherwise-ignored dir)
+!data/gp_slices/
+data/gp_slices/*
+!data/gp_slices/scale05_selectedN_full_l1_avg5_gp_slices_iters10_30_50_100.csv
+
+# True-score cache (single file inside an otherwise-ignored dir)
+!data/score_cache/
+data/score_cache/*
+!data/score_cache/scale05_true_2ms_full_l1_slices_freqspan10_grid201.csv
+
+# 2MS contour heatmap inputs
+!data/varms_2_refined_merged_heatmap_rabi_sideband.csv
+!data/varms_2_refined_merged_heatmap_rabi_fcl.csv
+!data/varms_2_refined_merged_heatmap_sideband_fcl.csv
+
+# Paper Figures
+!figures/paper/
+figures/paper/*
+!figures/paper/figure_ab_vertical.png
+!figures/paper/figure_ab_vertical.pdf
+!figures/paper/figure_fcl_amp_n100_gpzoom.png
+!figures/paper/figure_fcl_amp_n100_gpzoom.pdf
+!figures/paper/mainpaper_contour_2ms.png

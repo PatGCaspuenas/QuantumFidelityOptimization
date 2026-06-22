@@ -1,0 +1,54 @@
+=== TRACE BENCHMARK RESULTS ===
+N_shots = Inf
+n_init = 2
+n_iter = 2
+num_sims = 1
+workers = 1
+threshold = 0.99
+disable_stopping = true
+require_surrogate_confidence = true
+stopping_rule = surrogate_then_noisy
+score_mode = odd_penalty
+confidence_z = 1.0
+restart_on_stagnation = false
+restart_failure_window = 14
+restart_min_active_iter = 20
+restart_min_delta = 0.02
+restart_disable_lcb = 0.85
+restart_max_restarts = 3
+restart_seed_policy = reset_local_bo_rng_and_worker_global_rng
+kappa = 1.9
+path_guard = false
+path_guard_init_design = latin_hypercube
+path_guard_init_center_exclusion = 0.0
+path_guard_init_sobol_skip_max = 2048
+decision_q_max = 1.0
+path_guard_trust_start_q = 0.7
+path_guard_strong_trust_q = 0.9
+path_guard_global_scout_period = 7
+path_guard_global_scout_frac = 0.15
+center_jitter_u_max = 0.0
+bound_scale = 0.1
+freq_span_mode = raw_khz
+freq_span_raw_kHz = 10.0
+freq_span_2pi_kHz = 1.5915494309189535
+fixed_init_seed = 0
+M_acq = 5000
+M_rec = 20000
+elapsed_seconds = 27.49282717704773
+
+=== RESULTS SUMMARY ===
+Early stops = 0 / 1
+Average Q_det = 0.9648640885304729 +/- 0.0
+Median Q_det = 0.9648640885304729
+Min Q_det = 0.9648640885304729
+Max Q_det = 0.9648640885304729
+Average log10(1-Q_det) = -1.454248775838115 +/- 0.0
+Average iterations = 2.0 +/- 0.0
+Average total shots = Inf
+Total restarts = 0
+Average restarts = 0.0 +/- 0.0
+
+=== All Results ===
+Sim	Seed	InitialSeed	Iterations	StoppedEarly	Restarts	RestartSeeds	TotalShots	NTrain	Q_det	Q_rec	Q_last	center_jitter_u1	center_jitter_u2	center_jitter_u3	true_opt_u1	true_opt_u2	true_opt_u3	ell1	ell2	ell3	sigma_f	c
+1	714078	714078	2	false	0		Inf	4	0.9648640885304729	0.9648640885304729	0.96215992155223173	0	0	0	-0	-0	-0	0.050000000000000031	0.050000000000000031	0.050000000000000031	0.94244550219027834	0.38729815944743801

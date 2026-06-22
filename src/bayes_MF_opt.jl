@@ -14,6 +14,7 @@ struct MFResult
     costs::Vector{Float64}              # length L
     n_init::Int
     n_iter::Int
+    n_iter_actual::Int                  # actual iterations run (may be < n_iter if threshold reached)
     maximize::Bool
     x_rec::Vector{Float64}
     ℓ_rec::Int                          # recommended fidelity index (usually argmax z)
@@ -101,7 +102,8 @@ function bayesopt_mf(f;
                      rng::Random.AbstractRNG=Random.default_rng(),
                      seed=nothing,
                      obs_noise::Float64=1e-3,
-                     optimize_hypers::Bool=false)
+                     optimize_hypers::Bool=false,
+                     fidelity_threshold=nothing)
 
     _validate_bounds(bounds)
     length(z_levels) == length(costs) || throw(DimensionMismatch("z_levels and costs must have same length"))
@@ -125,6 +127,7 @@ function bayesopt_mf(f;
     n_total = n_init + n_iter
     Xa = Matrix{Float64}(undef, d+1, n_total)
     y_int = Vector{Float64}(undef, n_total)
+    n_iter_actual = n_iter
 
     # init: random x and random fidelity index
     for i in 1:n_init
@@ -163,8 +166,24 @@ function bayesopt_mf(f;
 
         Xa[:, i] = best_u
         y_int[i] = f_eval(best_u[1:d], best_ℓ)
+        
+        # Check fidelity threshold for early stopping (latest measurement only)
+        if fidelity_threshold !== nothing
+            y_latest_raw = maximize ? y_int[i] : -y_int[i]
+            reached = maximize ? (y_latest_raw >= fidelity_threshold) : (y_latest_raw <= fidelity_threshold)
+            if reached
+                n_iter_actual = i - n_init
+                break
+            end
+        end
     end
 
+    # Trim arrays if early stopping occurred
+    if n_iter_actual < n_iter
+        Xa = Xa[:, 1:(n_init + n_iter_actual)]
+        y_int = y_int[1:(n_init + n_iter_actual)]
+    end
+    
     # recommendation: argmax posterior mean at highest z level
     gp, yμ, yσ = fit_gp_stable(Xa, y_int; obs_noise=obs_noise, optimize_hypers=optimize_hypers)
     ℓ_hi = argmax(z_levels)
@@ -186,5 +205,5 @@ function bayesopt_mf(f;
     y_user = maximize ? y_int : (-y_int)
     y_rec  = maximize ? best_m : -best_m
 
-    return MFResult(Xa, y_user, bounds, z_levels, costs, n_init, n_iter, maximize, x_rec, ℓ_hi, y_rec)
+    return MFResult(Xa, y_user, bounds, z_levels, costs, n_init, n_iter, n_iter_actual, maximize, x_rec, ℓ_hi, y_rec)
 end

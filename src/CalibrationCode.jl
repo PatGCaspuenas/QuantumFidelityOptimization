@@ -7,20 +7,19 @@ using Statistics
 using LinearAlgebra
 using Logging
 
-# Physics packages (needed by calibration.jl and Q_noisy/Q_det)
-using IonSim
-using QuantumOptics
-using StatsBase
-using LsqFit
+using IonSim, QuantumOptics, StatsBase
+using SpecialFunctions: erf
 const pc = IonSim.PhysicalConstants
 
 # --- Physics / estimators (IonSim + QuantumOptics live in calibration.jl) ---
 include("calibration.jl")
+include("ms_sequences.jl")
+include("ms_sequence_search.jl")
 include("coordinate_search.jl")
 
 # --- Bayesian optimization variants ---
 include("bayes_opt.jl")             # homoscedastic GP + EI
-include("bayes_hetero_opt.jl")      # heteroscedastic GP + UCB + σ-threshold
+include("bayes_hetero_opt.jl")  # heteroscedastic GP + UCB + σ-threshold
 include("bayes_cokrig_opt.jl")      # 2-fidelity AR(1) co-kriging
 include("bayes_MF_opt.jl")          # N-fidelity augmented-input GP (z-levels)
 
@@ -32,16 +31,17 @@ include("bayes_MF_opt.jl")          # N-fidelity augmented-input GP (z-levels)
 # -------------------------------
 
 # Estimators / calibration
-export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy
-export coordinate_search, trial
+export bell_fidelity_phi_plus, ideal, Q_det, Q_noisy,
+       sigma_binomial, sigma_delta,
+       Q_varMS, Q_varMS_σ, Q_varMS_balance_σ, Q_mc_varMS,
+       Q_ms_sequence, Q_ms_sequence_det, Q_ms_sequence_σ, sequence_C_subgates
 
 # Homoscedastic BO
 export BOResult, bayesopt
 
 # Heteroscedastic BO
-export HeteroGP, HeteroBOResult
+export HeteroGP, HeteroBOResult, PathGuardConfig
 export fit_heterogp, predict_latent
-export choose_sigma_threshold, count_noise_levels
 export bayesopt_ucb_threshold
 
 # 2-fidelity co-kriging BO
