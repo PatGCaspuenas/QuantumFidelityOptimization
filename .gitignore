@@ -4,3 +4,5 @@ figures/*
 *.gif
 others/
 docs/
+.DS_Store
+.vscode/

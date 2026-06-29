@@ -1,43 +1,61 @@
-# Setup Instructions
+# Installation
 
 ## Requirements
-- macOS or Linux
-- curl (pre-installed on both)
-- Git
 
-## Automated Setup (recommended)
+- Linux or macOS
+- `curl` and `git` (pre-installed on both)
+- Internet access (for juliaup and package downloads)
 
-From the repo root, run:
+## Automated setup (recommended)
 
-    bash setup.sh
+From the repository root:
 
-This single command will:
-1. Install juliaup (if not already installed)
-2. Install and set Julia 1.11.6 as default
-3. Develop IonSim into ~/.julia/dev/IonSim
-4. Check out IonSim v0.5.1
-5. Automatically patch iontraps.jl (Optim.Options tolerances)
-6. Restore the locked Manifest.toml so all package versions match exactly
-7. Instantiate and build all dependencies
+```bash
+bash setup.sh
+```
 
-## Running the Project
+This single command:
 
-    julia --project=. src/main.jl
+1. Installs [juliaup](https://github.com/JuliaLang/juliaup) if not present
+2. Installs Julia 1.11.6 and sets it as the default
+3. Clones IonSim v0.5.1 to `~/.julia/dev/IonSim`
+4. Applies a required compatibility patch to `IonSim/src/iontraps.jl` (tightens `Optim.Options` tolerances so the IonSim internal optimizer converges reliably)
+5. Instantiates all other dependencies from the locked `Manifest.toml`
+6. Builds IonSim
 
-## Undoing the IonSim Patch
+Total time is typically 10–20 minutes on a fresh machine (dominated by package downloads and precompilation).
 
-    git -C ~/.julia/dev/IonSim checkout -- src/iontraps.jl
+## Verifying the installation
 
-## Manual Steps (reference only)
+```bash
+julia --project=. examples/toy_hetero_2d.jl
+```
 
-The patch applied to ~/.julia/dev/IonSim/src/iontraps.jl replaces the
-Optim.Options(...) call (around line 495) with:
+Expected output: a recommended point and distance-to-optimum printed to stdout.
 
-    Optim.Options(g_tol=1e-6, x_abstol=1e-12, x_reltol=1e-6,
-                  f_abstol=1e-12, f_reltol=1e-6)
+## Undoing the IonSim patch
 
-If you need to redo the setup from scratch, remove your existing Julia
-environment first:
+```bash
+git -C ~/.julia/dev/IonSim checkout -- src/iontraps.jl
+```
 
-    rm -rf ~/.julia
-    bash setup.sh
+## Manual setup (reference)
+
+If you prefer not to use `setup.sh`:
+
+```julia
+import Pkg
+Pkg.develop("IonSim")
+# Checkout v0.5.1:
+#   git -C ~/.julia/dev/IonSim checkout v0.5.1
+# Apply patch to iontraps.jl (see setup_pkg.jl for the exact replacement)
+Pkg.instantiate()
+Pkg.build("IonSim")
+```
+
+The patch replaces the `Optim.Options(...)` call near line 495 of `iontraps.jl` with:
+
+```julia
+Optim.Options(g_tol=1e-6, x_abstol=1e-12, x_reltol=1e-6,
+              f_abstol=1e-12, f_reltol=1e-6)
+```
