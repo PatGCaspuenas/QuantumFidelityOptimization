@@ -74,7 +74,7 @@ To verify:
   julia --project=. examples/toy_hetero_2d.jl
 
 To reproduce paper results:
-  bash scripts/run_traces.sh
+  bash scripts/run_main.sh
   julia --project=. scripts/gp_fit_quality_study.jl
 
 To undo the IonSim patch later:

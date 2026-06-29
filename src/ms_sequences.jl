@@ -1,8 +1,7 @@
 # src/ms_sequences.jl
 #
-# Shared helpers for closed-loop MS subgate concatenations used by search and
-# plotting scripts. These live in `src/` so all callers exercise the same
-# pulse-construction and IonSim evolution path.
+# Closed-loop MS subgate pulse construction + IonSim evolution. Used by the
+# Q_varMS estimator in calibration.jl.
 
 const _ODEMod = Base.loaded_modules[Base.PkgId(
     Base.UUID("1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"), "OrdinaryDiffEq")]
@@ -11,13 +10,6 @@ const Vern7 = _ODEMod.Vern7
 Base.@kwdef struct MSSubgate
     theta::Float64
     phi::Float64 = 0.0
-end
-
-Base.@kwdef struct MSSequenceSpec
-    name::Symbol
-    label::String
-    subgates::Vector{MSSubgate}
-    linestyle::Symbol = :solid
 end
 
 ms_subgate(theta::Real, phi::Real=0.0) = MSSubgate(Float64(theta), Float64(phi))
@@ -70,157 +62,4 @@ function populations_ms_sequence(pulses)
     DS = real(expect(ionprojector(chamber, "D", "S"), state))
     DD = real(expect(ionprojector(chamber, "D", "D"), state))
     return (gg=SS, eg=SD, ge=DS, ee=DD)
-end
-
-function reduced_density_ms_sequence(pulses)
-    setup = build_chamber()
-    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
-    state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
-    for pulse in pulses
-        configure_lasers!(setup, pulse.f_cl, pulse.Δ, pulse.I;
-                          phi_1=pulse.phi_1, phi_2=pulse.phi_2)
-        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
-        tout = Float64[0.0, pulse.t]
-        _, sol = timeevolution.schroedinger_dynamic(tout, state, h; alg=Vern7())
-        state = sol[end]
-    end
-    return ptrace(state ⊗ dagger(state), [3]).data
-end
-
-function trinary_ms_probabilities(pops)
-    probs = Float64[
-        max(pops.gg, 0.0),
-        max(pops.ee, 0.0),
-        max(pops.eg + pops.ge, 0.0),
-    ]
-    total = sum(probs)
-    total > 0.0 || return (gg=0.5, ee=0.5, odd=0.0)
-    probs ./= total
-    return (gg=probs[1], ee=probs[2], odd=probs[3])
-end
-
-ms_balance_and_odd(pops) = begin
-    probs = trinary_ms_probabilities(pops)
-    Float64[probs.gg - probs.ee, probs.odd]
-end
-
-function ms_observable_covariance(pops)
-    probs = trinary_ms_probabilities(pops)
-    p = Float64[probs.gg, probs.ee, probs.odd]
-    Σp = Diagonal(p) - p * transpose(p)
-    A = Float64[1.0 -1.0 0.0;
-                0.0  0.0 1.0]
-    return A * Σp * transpose(A)
-end
-
-function same_ms_subgates(a::AbstractVector{<:MSSubgate},
-                          b::AbstractVector{<:MSSubgate};
-                          atol_theta::Float64=1e-8,
-                          atol_phi::Float64=1e-8)
-    length(a) == length(b) || return false
-    return all(
-        isapprox(ga.theta, gb.theta; atol=atol_theta, rtol=0.0) &&
-        isapprox(ga.phi, gb.phi; atol=atol_phi, rtol=0.0)
-        for (ga, gb) in zip(a, b)
-    )
-end
-
-sequence_A_subgates() = [
-    ms_subgate(π / 2, 0.0),
-    ms_subgate(π / 2, 0.0),
-    ms_subgate(π / 2, 0.0),
-]
-
-sequence_B_subgates() = [
-    ms_subgate(π / 2, 0.0),
-    ms_subgate(π / 2, π / 4),
-]
-
-default_ms_sequence_specs() = [
-    MSSequenceSpec(
-        name=:seq_A,
-        label="3 × MS₀(π/2)",
-        subgates=sequence_A_subgates(),
-        linestyle=:dot,
-    ),
-    MSSequenceSpec(
-        name=:seq_B,
-        label="MS₀(π/2) then MS_{π/4}(π/2)",
-        subgates=sequence_B_subgates(),
-        linestyle=:dash,
-    ),
-]
-
-function refine_bell_ms_sequence_omega_ratio(t, f_cl, Δ, I_pi2,
-                                             subgates::AbstractVector{<:MSSubgate};
-                                             ratio_grid::AbstractVector{<:Real})
-    best_ratio = Float64(first(ratio_grid))
-    best_fid = -Inf
-    for ratio in ratio_grid
-        pulses = build_closed_loop_ms_sequence(
-            t, f_cl, Δ, I_pi2, subgates; omega_ratio=Float64(ratio))
-        fid = bell_fidelity_phi_plus(reduced_density_ms_sequence(pulses))
-        if fid > best_fid
-            best_ratio = Float64(ratio)
-            best_fid = fid
-        end
-    end
-    return (ratio=best_ratio, fid=best_fid)
-end
-
-function Q_ms_sequence_det(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
-                           subgates::AbstractVector{<:MSSubgate};
-                           relative_phase::Float64=0.0,
-                           phase_drift::Float64=0.0)::Float64
-    pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
-                                           relative_phase=relative_phase,
-                                           phase_drift=phase_drift)
-    rho = reduced_density_ms_sequence(pulses)
-    return bell_fidelity_phi_plus(rho)
-end
-
-function Q_ms_sequence(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64,
-                       subgates::AbstractVector{<:MSSubgate};
-                       N::Real=400,
-                       expected_gg::Float64=NaN,
-                       expected_ee::Float64=NaN,
-                       relative_phase::Float64=0.0,
-                       phase_drift::Float64=0.0,
-                       round_expected_to_shots::Bool=false)::Float64
-    n_eval = _shot_count_or_inf(N)
-    pulses = build_closed_loop_ms_sequence(t, f_cl, f_sb, A, subgates;
-                                           relative_phase=relative_phase,
-                                           phase_drift=phase_drift)
-    pops = populations_ms_sequence(pulses)
-    weights = Float64[max(pops.gg, 0.0), max(pops.ee, 0.0),
-                      max(pops.eg, 0.0), max(pops.ge, 0.0)]
-    total = sum(weights)
-    total > 0.0 || throw(ArgumentError("Population weights must have positive total."))
-    weights ./= total
-    if isinf(Float64(n_eval))
-        P_SS = weights[1]
-        P_DD = weights[2]
-        target_gg = expected_gg
-        target_ee = expected_ee
-    else
-        samples = StatsBase.sample(1:4, StatsBase.Weights(weights), n_eval)
-        P_SS = count(==(1), samples) / n_eval
-        P_DD = count(==(2), samples) / n_eval
-        target_gg = (!isnan(expected_gg) && round_expected_to_shots) ?
-                    _round_probability_to_shots(expected_gg, n_eval) : expected_gg
-        target_ee = (!isnan(expected_ee) && round_expected_to_shots) ?
-                    _round_probability_to_shots(expected_ee, n_eval) : expected_ee
-    end
-    if !isnan(expected_gg)
-        return clamp(1.0 - (abs(target_gg - P_SS) + abs(target_ee - P_DD)), 0.0, 1.0)
-    end
-    return clamp(P_SS + P_DD, 0.0, 1.0)
-end
-
-function sequence_C_subgates()
-    return [
-        ms_subgate(3π / 16, 0.0),
-        ms_subgate(π / 4, 0.0),
-        ms_subgate(5π / 16, 0.0),
-    ]
 end

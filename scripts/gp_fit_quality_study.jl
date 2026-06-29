@@ -14,7 +14,7 @@ end
     import Pkg
     Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
     include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
-    using LinearAlgebra, Random, Statistics, Distributions
+    using LinearAlgebra, Random, Statistics
     using SpecialFunctions: erf
     BLAS.set_num_threads(1)
 
@@ -31,7 +31,7 @@ end
 end
 
 # ── Physical setup ─────────────────────────────────────────────────────────────
-# Matches optimization_data_generation.jl: TRACE_FREQ_SPAN_KHZ=10, TRACE_BOUND_SCALE=0.5
+# Matches run_main.sh: FREQ_SPAN_KHZ=10, BOUND_SCALE=0.5
 const FREQ_SPAN_KHZ = 10.0
 const BOUND_SCALE   = 0.5
 const NEAR_THRESH   = 0.1   # off-axis proximity for training-point overlay
@@ -42,7 +42,7 @@ f_cl0 = Float64(base.f_cl)
 f_sb0 = Float64(base.f_sb)
 A0    = Float64(base.A)
 
-# span_fcl = FREQ_SPAN_KHZ_OVERRIDE * 1e3  (no 2pi factor, matching opt_data_gen.jl line 228)
+# span_fcl = FREQ_SPAN_KHZ * 1e3  (no 2pi factor, matching main_opt.jl)
 span_fcl = FREQ_SPAN_KHZ * 1e3
 span_fsb = FREQ_SPAN_KHZ * 1e3
 span_A   = 1.2 * A0 - A0
@@ -57,54 +57,18 @@ span_A   = 1.2 * A0 - A0
 @everywhere const _BOUND       = $BOUND_SCALE   # domain is [-_BOUND, _BOUND]^3
 @everywhere const _NEAR_THRESH = $NEAR_THRESH
 
-# ── Score functions (full_l1, matching TRACE_SCORE_MODE=full_l1) ───────────────
+# ── Objective: MS fidelity via CalibrationCode.Q_varMS ─────────────────────────
 @everywhere begin
-    function _u_to_params(u::Vector{Float64})
-        return (_f_cl0 + _span_fcl * u[1],
-                _f_sb0 + _span_fsb * u[2],
-                _A0    + _span_A   * u[3])
-    end
+    _u_to_params(u::Vector{Float64}) =
+        (_f_cl0 + _span_fcl * u[1], _f_sb0 + _span_fsb * u[2], _A0 + _span_A * u[3])
 
-    function _varms_weights(u::Vector{Float64})
-        fcl, fsb, A = _u_to_params(u)
-        subgates = [CalibrationCode.MSSubgate(π / 2, 0.0),
-                    CalibrationCode.MSSubgate(π / 2, 0.0)]
-        pulses = CalibrationCode.build_closed_loop_ms_sequence(_t, fcl, fsb, A, subgates)
-        pops   = CalibrationCode.populations_ms_sequence(pulses)
-        w = Float64[max(pops.gg, 0.0), max(pops.eg, 0.0),
-                    max(pops.ge, 0.0), max(pops.ee, 0.0)]
-        s = sum(w)
-        s > 0.0 && (w ./= s)
-        return w
-    end
-
-    @inline function _full_l1_score(p_ss::Float64, p_sd::Float64,
-                                    p_ds::Float64, p_dd::Float64)
-        l1 = abs(p_ss) + abs(p_sd) + abs(p_ds) + abs(p_dd - 1.0)
-        return clamp(1.0 - 0.5 * l1, 0.0, 1.0)
-    end
-
-    # Deterministic (noise-free) score.
-    function Q_det(u::Vector{Float64})
-        w = _varms_weights(u)
-        return _full_l1_score(w[1], w[2], w[3], w[4])
-    end
-
-    # Stochastic score via multinomial shot noise.
-    # σ uses the exact full_l1 noise model: sqrt(p_dd*(1-p_dd)/N).
+    # (y, σy) shot-noisy fidelity at u; N=Inf → deterministic (σ=0).
     function Q_fun(u::Vector{Float64}, N::Real, rng::AbstractRNG)
-        w = _varms_weights(u)
-        if isinf(N)
-            return _full_l1_score(w[1], w[2], w[3], w[4]), 0.0
-        end
-        n_int  = Int(N)
-        counts = rand(rng, Multinomial(n_int, w))
-        n_f    = Float64(n_int)
-        y = _full_l1_score(counts[1]/n_f, counts[2]/n_f,
-                            counts[3]/n_f, counts[4]/n_f)
-        σ = sqrt(max(w[4] * (1.0 - w[4]), 0.0) / n_f)
-        return y, σ
+        fcl, fsb, A = _u_to_params(u)
+        return CalibrationCode.Q_varMS(_t, fcl, fsb, A; N=N, rng=rng)
     end
+
+    Q_det(u::Vector{Float64}) = Q_fun(u, Inf, Random.default_rng())[1]
 end
 
 # ── Study parameters ───────────────────────────────────────────────────────────
@@ -114,7 +78,7 @@ const N_SEEDS = parse(Int, get(ENV, "GP_STUDY_N_SEEDS", "50"))
 const N_TEST  = parse(Int, get(ENV, "GP_STUDY_N_TEST",  "5000"))
 const N_SLICE = 100
 
-println("GP fit quality study — full_l1 score, FREQ_SPAN=$(FREQ_SPAN_KHZ) kHz, BOUND=$(BOUND_SCALE)")
+println("GP fit quality study — FREQ_SPAN=$(FREQ_SPAN_KHZ) kHz, BOUND=$(BOUND_SCALE)")
 println("  N_pts    : $N_PTS_LIST")
 println("  N_shots  : $N_SHOTS_LIST")
 println("  Seeds    : $N_SEEDS   N_test = $N_TEST")
@@ -128,13 +92,11 @@ lb3d = fill(-BOUND_SCALE, 3)
 ub3d = fill( BOUND_SCALE, 3)
 _test_mat = QuasiMonteCarlo.sample(N_TEST, lb3d, ub3d, QuasiMonteCarlo.SobolSample())
 
-# Precompute Q_det and p_dd (ee population) for every test point.
-# p_dd feeds the exact full_l1 shot noise variance: σ² = p_dd*(1-p_dd)/N.
+# Precompute Q_det and p_dd (DD population) for every test point.
+# p_dd feeds the exact shot noise variance: σ² = p_dd*(1-p_dd)/N.
 _q_pdd_vec = pmap(1:N_TEST; batch_size=32) do i
-    u = _test_mat[:, i]
-    w = _varms_weights(u)
-    q = _full_l1_score(w[1], w[2], w[3], w[4])
-    (q, w[4])
+    w = CalibrationCode.varms_weights(_t, _u_to_params(_test_mat[:, i])...)
+    (CalibrationCode.varms_full_l1_score(w), w[4])
 end
 Q_true_arr = Float64[r[1] for r in _q_pdd_vec]
 p_dd_arr   = Float64[r[2] for r in _q_pdd_vec]
@@ -164,7 +126,7 @@ Q_det_amp = Float64[Q_det([0.0, 0.0, u]) for u in _slice_u_vec]
 # ── Core worker function ───────────────────────────────────────────────────────
 @everywhere begin
     # GP quality metrics against precomputed test grid.
-    # σ_noise² = p_dd*(1-p_dd)/N (exact full_l1 model); 0 when N=Inf.
+    # σ_noise² = p_dd*(1-p_dd)/N (exact shot-noise model); 0 when N=Inf.
     # The combined metric (cov95_adj, nlpd_adj, crps) accounts for both
     # GP uncertainty and measurement noise simultaneously.
     function compute_metrics(μs::Vector{Float64}, σs::Vector{Float64},
