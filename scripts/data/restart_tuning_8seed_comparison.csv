@@ -1,4 +1,0 @@
-name,q_ge_099,q_ge_098,stopped,n,mean_q,std_q,min_q,mean_iter,median_iter,std_iter,max_iter,mean_restarts,total_restarts,max_restarts,path
-aggr1_z100,7,8,7,8,0.9949480621275756,0.005724716530998121,0.9815184443406183,93.375,91.5,34.50439930543019,160,1,8,3,scripts/data/benchmark_trace_N100_lhs12_restart_tune_aggr1_N100_8seeds.txt
-aggr2_z125,8,8,7,8,0.9948907434204091,0.0031592920627501525,0.9901721861804538,116.375,127.0,36.629174554874,160,2.625,21,5,scripts/data/benchmark_trace_N100_lhs12_restart_tune_aggr2_z125_N100_8seeds.txt
-aggr1_z125,8,8,7,8,0.9969272196788765,0.002334294658380394,0.9936220175456137,102.75,94.5,28.383848525928563,160,1,8,3,scripts/data/benchmark_trace_N100_lhs12_restart_tune_aggr1_z125_N100_8seeds.txt

@@ -2,7 +2,7 @@
 
 julia_version = "1.11.6"
 manifest_format = "2.0"
-project_hash = "aa16a89d0832d2c8551bbd61934135f8d64b3e8c"
+project_hash = "1ebe70fb9476eba0c8272eca5766160d6fce0acb"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "60665b326b75db6517939d0e1875850bc4a54368"
@@ -1155,7 +1155,7 @@ weakdeps = ["Dates", "Test"]
 
 [[deps.IonSim]]
 deps = ["FunctionWrappers", "LinearAlgebra", "NLsolve", "Optim", "OrderedCollections", "Plots", "PolynomialRoots", "QuantumOptics", "SparseArrays", "Statistics", "WignerSymbols", "YAML"]
-path = "/Users/caleb/.julia/dev/IonSim"
+path = "/home/patcaspu/.julia/dev/IonSim"
 uuid = "511e77fe-ab93-41f7-8f07-8f89809c6435"
 version = "0.5.1"
 
@@ -2321,9 +2321,9 @@ version = "0.3.14"
 
 [[deps.SpecialFunctions]]
 deps = ["IrrationalConstants", "LogExpFunctions", "OpenLibm_jll", "OpenSpecFun_jll"]
-git-tree-sha1 = "41852b8679f78c8d8961eeadc8f62cef861a52e3"
+git-tree-sha1 = "6547cbdd8ce32efba0d21c5a40fa96d1a3548f9f"
 uuid = "276daf66-3868-5448-9aa4-cd146d93841b"
-version = "2.5.1"
+version = "2.8.0"
 weakdeps = ["ChainRulesCore"]
 
     [deps.SpecialFunctions.extensions]

@@ -4,10 +4,7 @@ include(joinpath(@__DIR__, "..", "src", "CalibrationCode.jl"))
 
 using Random
 using Distributions
-using Plots
 using .CalibrationCode
-
-include(joinpath(@__DIR__, "..", "scripts", "plots_standard.jl"))  # provides plot2d_standard/animate2d_standard
 
 function main(; seed=1, σ=0.01)
     rng = MersenneTwister(seed)
@@ -29,19 +26,8 @@ function main(; seed=1, σ=0.01)
 
     best_idx = argmax(res.y)
     x_rec = vec(res.X[:, best_idx])
-    y_rec = res.y[best_idx]
-
-    x_best = vec(res.X[:, best_idx])
-    println("Best observed x = ", x_best, "   best observed y = ", res.y[best_idx])
-    println("Recommended x (posterior mean argmax) = ", x_rec, "   y ≈ ", y_rec)
-
-    p = plot2d_standard(res; f_true=f_true, nx=50, ny=50, obs_noise=σ)
-    savefig(p, "figures/toy_standard_2d.png")
-    println("Saved -> figures/toy_standard_2d.png")
-
-    anim, fps = animate2d_standard(res; f_true=f_true, nx=50, ny=50, fps=6, obs_noise=σ)
-    gif(anim, "figures/toy_standard_2d.gif", fps=fps)
-    println("Saved -> figures/toy_standard_2d.gif")
+    println("Best observed x = ", x_rec, "   y = ", res.y[best_idx])
+    println("Distance to true optimum ≈ ", sqrt((x_rec[1]-0.3)^2 + (x_rec[2]+0.2)^2))
 end
 
 if !isinteractive()

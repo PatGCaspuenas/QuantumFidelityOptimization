@@ -321,7 +321,7 @@ Q_det_amp = Float64[Q_det([0.0, 0.0, u]) for u in _slice_u_vec]
 end
 
 # ── CSV helpers ────────────────────────────────────────────────────────────────
-outdir = joinpath(@__DIR__, "data")
+outdir = joinpath(@__DIR__, "..", "data")
 mkpath(outdir)
 metrics_file = joinpath(outdir, "gp_fit_quality_3d_2ms.csv")
 slices_file  = joinpath(outdir, "slices_output.csv")
