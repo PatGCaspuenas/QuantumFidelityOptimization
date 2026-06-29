@@ -34,11 +34,6 @@ function global_rotation(θ::Real, φ::Real=0.0)
     return Operator(_TWO_QUBIT_BASIS, kron(U, U))
 end
 
-# Convert IonSim reduced density operator to a QuantumOptics.Operator on 2 qubits
-function ion_sim_to_qo_operator(ρ)
-    return Operator(_TWO_QUBIT_BASIS, ρ.data)
-end
-
 proj(state, ρ) = real(expect(state ⊗ dagger(state), ρ))
 
 function _normalized_population_weights(values::NTuple{4,<:Real})
@@ -58,19 +53,6 @@ function _shot_count_or_inf(N::Real)
     n_int = Int(n)
     n_int > 0 || throw(ArgumentError("N must be positive."))
     return n_int
-end
-
-_round_probability_to_shots(p::Real, n::Int) =
-    clamp(round(Float64(p) * n) / n, 0.0, 1.0)
-
-function _expected_ms_even_populations(numMS::Int)
-    numMS ≥ 1 || throw(ArgumentError("numMS must be positive."))
-    if isodd(numMS)
-        return (SS=0.5, DD=0.5)
-    elseif numMS % 4 == 2
-        return (SS=0.0, DD=1.0)
-    end
-    return (SS=1.0, DD=0.0)
 end
 
 # --- IonSim setup (centralized to avoid repetition)
@@ -245,7 +227,7 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     end
 
     ρ_red = ptrace(sol[end] ⊗ dagger(sol[end]), [3])
-    ρ = ion_sim_to_qo_operator(ρ_red)
+    ρ = Operator(_TWO_QUBIT_BASIS, ρ_red.data)
 
     SSs = tensor(spinup(_SPIN_BASIS), spinup(_SPIN_BASIS))
     SDs = tensor(spinup(_SPIN_BASIS), spindown(_SPIN_BASIS))
@@ -281,152 +263,40 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     return clamp((1 - P_odd + C) / 2, 0.0, 1.0)
 end
 
-"""
-    Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, relative_phase=0.0, phase_drift=0.0) -> Float64
+# Normalized (p_ss, p_sd, p_ds, p_dd) populations after `numMS` closed-loop MS(π/2) gates.
+function varms_weights(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
+                       numMS::Int=2, relative_phase::Float64=0.0, phase_drift::Float64=0.0)
+    subgates = [ms_subgate(π / 2, 0.0) for _ in 1:numMS]
+    pulses = build_closed_loop_ms_sequence(t, f_cl, Δ, I, subgates;
+                                           relative_phase=relative_phase, phase_drift=phase_drift)
+    pops = populations_ms_sequence(pulses)
+    return _normalized_population_weights((pops.gg, pops.eg, pops.ge, pops.ee))
+end
 
-Sampled population-score estimator for repeated MS pulses. The expected even
-populations are inferred from `numMS`: odd counts target a balanced SS/DD readout,
-`numMS % 4 == 2` targets DD, and `numMS % 4 == 0` targets SS.
+# Fidelity to the ideal |DD⟩ outcome: 1 - ½‖p - e_DD‖₁ over (p_ss, p_sd, p_ds, p_dd).
+varms_full_l1_score(w) =
+    clamp(1.0 - 0.5 * (abs(w[1]) + abs(w[2]) + abs(w[3]) + abs(w[4] - 1.0)), 0.0, 1.0)
+
+"""
+    Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, relative_phase=0.0, phase_drift=0.0) -> (y, σy)
+
+Fidelity observation for a closed-loop sequence of `numMS` MS(π/2) gates,
+targeting all population in |DD⟩. Returns the score `y = 1 - ½‖p - e_DD‖₁` over
+the four populations and the binomial projection-noise std `σy` (on the DD
+outcome). With finite `N` the populations are multinomially sampled; `N=Inf`
+returns the exact Born-rule score with `σy=0`.
 """
 function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
                  N::Real=1000, numMS::Int=2,
                  relative_phase::Float64=0.0,
                  phase_drift::Float64=0.0,
-                 round_expected_to_shots::Bool=false)::Float64
+                 rng::Random.AbstractRNG=Random.default_rng())
     n_eval = _shot_count_or_inf(N)
-    expected = _expected_ms_even_populations(numMS)
-
-    setup = build_chamber()
-    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
-    tout = Float64[0.0, t]
-    state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
-
-    for gate_idx in 1:numMS
-        accumulated = (gate_idx - 1)
-        net_phase = accumulated * (relative_phase - phase_drift)
-        configure_lasers!(setup, f_cl, Δ, I,
-                          phi_1=net_phase,
-                          phi_2=0.0)
-        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
-        _, sol = timeevolution.schroedinger_dynamic(tout, state, h)
-        state = sol[end]
-    end
-
-    SS = real(expect(ionprojector(chamber, "S", "S"), state))
-    DD = real(expect(ionprojector(chamber, "D", "D"), state))
-    SD = real(expect(ionprojector(chamber, "S", "D"), state))
-    DS = real(expect(ionprojector(chamber, "D", "S"), state))
-
-    # Q_varMS sampling order: 1=SS, 2=DD, 3=SD, 4=DS.
-    weights = _normalized_population_weights((SS, DD, SD, DS))
-    if isinf(Float64(n_eval))
-        P_SS = weights[1]
-        P_DD = weights[2]
-        expected_SS = expected.SS
-        expected_DD = expected.DD
-    else
-        samples = StatsBase.sample(1:4, StatsBase.Weights(weights), n_eval)
-        P_SS = count(==(1), samples) / n_eval
-        P_DD = count(==(2), samples) / n_eval
-        expected_SS = round_expected_to_shots ?
-                      _round_probability_to_shots(expected.SS, n_eval) : expected.SS
-        expected_DD = round_expected_to_shots ?
-                      _round_probability_to_shots(expected.DD, n_eval) : expected.DD
-    end
-
-    score = 1.0 - (abs(expected_SS - P_SS) + abs(expected_DD - P_DD))
-    return clamp(score, 0.0, 1.0)
-end
-
-function _varms_success_probability(weights::AbstractVector{<:Real}, numMS::Int)
-    if isodd(numMS)
-        return Float64(weights[1] + weights[2])   # SS or DD
-    elseif numMS % 4 == 2
-        return Float64(weights[2])                # DD only
-    end
-    return Float64(weights[1])                    # SS only
-end
-
-"""
-    Q_mc_varMS(t, f_cl, Δ, I; N=50, numMS=2, ..., δ_rms_hz=300.0, Ω_rms_frac=0.007) -> Float64
-
-Monte-Carlo fidelity estimator with shot-to-shot parameter noise AND quantum
-projection noise.  For each of `N` shots:
-  1. Draw quasi-static detuning offset  δ ~ N(0, δ_rms_hz·2π)
-  2. Draw quasi-static amplitude error   ε ~ N(0, Ω_rms_frac), intensity scales as (1+ε)²
-  3. Run full Hamiltonian propagation with perturbed parameters
-  4. Sample a single measurement outcome from the population probabilities
-
-Returns fraction of successful outcomes / N.
-
-Use `N=Inf` to return the nominal Born-rule success probability without
-projection sampling or shot-to-shot parameter draws.
-"""
-function Q_mc_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
-                    N::Real=50, numMS::Int=2,
-                    phi_1::Float64=0.0, phi_2::Float64=0.0,
-                    δ_rms_hz::Float64=300.0, Ω_rms_frac::Float64=0.007,
-                    rng::Random.AbstractRNG=Random.default_rng())::Float64
-    n_eval = _shot_count_or_inf(N)
-
-    setup = build_chamber()
-    ca, chamber, mode = setup.ca, setup.chamber, setup.mode
-    tout = Float64[0.0, t]
-    init_state = ca["S"] ⊗ ca["S"] ⊗ mode[0]
-
-    success_pred = if isodd(numMS)
-        s -> s == 1 || s == 2   # SS or DD
-    elseif numMS % 4 == 2
-        s -> s == 2             # DD only
-    else
-        s -> s == 1             # SS only
-    end
-
-    if isinf(Float64(n_eval))
-        configure_lasers!(setup, f_cl, Δ, I; phi_1=phi_1, phi_2=phi_2)
-        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
-        _, sol = timeevolution.schroedinger_dynamic(tout, init_state, h)
-        for _ in 2:numMS
-            _, sol = timeevolution.schroedinger_dynamic(tout, sol[end], h)
-        end
-        SS = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
-        DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
-        SD = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
-        DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
-        weights = _normalized_population_weights((SS, DD, SD, DS))
-        return clamp(_varms_success_probability(weights, numMS), 0.0, 1.0)
-    end
-
-    successes = 0
-    for _ in 1:n_eval
-        # Shot-to-shot parameter perturbation
-        δ  = randn(rng) * δ_rms_hz * 2π
-        ε  = randn(rng) * Ω_rms_frac
-        Δ_noisy = Δ + δ
-        I_noisy = I * (1.0 + ε)^2
-
-        configure_lasers!(setup, f_cl, Δ_noisy, I_noisy;
-                          phi_1=phi_1, phi_2=phi_2)
-
-        h = hamiltonian(chamber, timescale=1e-6, lamb_dicke_order=1, rwa_cutoff=Inf)
-        _, sol = timeevolution.schroedinger_dynamic(tout, init_state, h)
-
-        for _ in 2:numMS
-            _, sol = timeevolution.schroedinger_dynamic(tout, sol[end], h)
-        end
-
-        SS = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
-        DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
-        SD = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
-        DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
-
-        weights = Float64[max(SS, 0.0), max(DD, 0.0), max(SD, 0.0), max(DS, 0.0)]
-        outcome = StatsBase.sample(1:4, StatsBase.Weights(weights))
-
-        if success_pred(outcome)
-            successes += 1
-        end
-    end
-
-    return successes / n_eval
+    w = varms_weights(t, f_cl, Δ, I; numMS=numMS,
+                      relative_phase=relative_phase, phase_drift=phase_drift)
+    isinf(Float64(n_eval)) && return varms_full_l1_score(w), 0.0
+    p_dd = w[4]
+    σy = sqrt(max(p_dd * (1.0 - p_dd), 0.0) / Float64(n_eval))
+    counts = rand(rng, Distributions.Multinomial(Int(n_eval), collect(Float64, w)))
+    return varms_full_l1_score(counts ./ Float64(n_eval)), σy
 end

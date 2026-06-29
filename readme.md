@@ -20,23 +20,22 @@ where p_ss, p_sd, p_ds, p_dd are the four measured two-qubit outcome probabiliti
 QuantumFidelityOptimization/
 ├── src/
 │   ├── CalibrationCode.jl        # module entry point + exports
-│   ├── calibration.jl            # IonSim-based physics model (ideal, Q_det, Q_noisy, …)
-│   ├── ms_sequences.jl           # MS subgate sequences and population calculator
-│   ├── bayes_hetero_opt.jl       # heteroscedastic GP-UCB (HeteroGP, fit_heterogp, …)
-│   └── bayes_opt.jl              # standard homoscedastic BO (for examples)
+│   ├── calibration.jl            # IonSim physics + estimators (ideal, Q_noisy, Q_varMS full-L1 objective)
+│   ├── ms_sequences.jl           # MS subgate pulse construction + population calculator
+│   └── bayes_opt.jl              # heteroscedastic GP-UCB (HeteroGP, fit_heterogp, bayesopt_ucb)
 │
 ├── scripts/
-│   ├── run_traces.sh                    # entry point: runs the full BO sweep
-│   ├── optimization_data_generation.jl  # distributed BO trace generator
-│   └── gp_fit_quality_study.jl          # GP fit quality vs. N_shots and n_pts
+│   ├── run_main.sh               # entry point: runs the full BO sweep
+│   ├── main_opt.jl              # distributed BO trace generator
+│   └── gp_fit_quality_study.jl  # GP fit quality vs. N_shots and n_pts
 │
 ├── examples/
-│   ├── toy_standard_2d.jl    # homoscedastic BO on a 2D toy function
-│   ├── toy_standard_3d.jl    # homoscedastic BO on a 3D toy function
-│   ├── toy_hetero_2d.jl      # heteroscedastic BO on a 2D toy function
-│   ├── toy_hetero_3d.jl      # heteroscedastic BO on a 3D toy function
-│   ├── calib_standard2D.jl   # homoscedastic BO on Q_noisy (f_sb, A)
-│   └── calib_standard3D.jl   # homoscedastic BO on Q_noisy (f_cl, f_sb, A)
+│   ├── toy_standard_2d.jl    # GP-UCB on a 2D toy function, constant-σ noise
+│   ├── toy_standard_3d.jl    # GP-UCB on a 3D toy function, constant-σ noise
+│   ├── toy_hetero_2d.jl      # GP-UCB on a 2D toy function, binomial shot noise
+│   ├── toy_hetero_3d.jl      # GP-UCB on a 3D toy function, binomial shot noise
+│   ├── calib_standard2D.jl   # GP-UCB on Q_noisy (f_sb, A)
+│   └── calib_standard3D.jl   # GP-UCB on Q_noisy (f_cl, f_sb, A)
 │
 ├── data/
 │   ├── traces_*/                        # per-seed BO trace CSVs (one dir per N)
@@ -70,18 +69,18 @@ This installs Julia 1.11.6, clones IonSim v0.5.1, applies a required compatibili
 Runs 100 independent BO seeds for each shot count N ∈ {100, 1000, 10000, 100000, ∞}:
 
 ```bash
-bash scripts/run_traces.sh
+bash scripts/run_main.sh
 ```
 
 Output is written to `data/traces_<tag>/` (one CSV per seed) and a summary text file per N in `data/`. The pre-generated data is already included in `data/`.
 
-Key parameters (set in `run_traces.sh`):
+Key parameters (set in `run_main.sh`):
 
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
 | `N_ITER` | 100 | BO iterations per run |
 | `N_INIT` | 12 | Latin hypercube initial design |
-| `KAPPA` | 1.9 | GP-UCB exploration parameter |
+| `KAPPA` | 1.96 | GP-UCB exploration parameter |
 | `BOUND_SCALE` | 0.5 | Search box half-width (normalized units) |
 | `FREQ_SPAN_KHZ` | 10 | Physical frequency span per axis |
 
@@ -123,8 +122,13 @@ include("src/CalibrationCode.jl")
 using .CalibrationCode
 
 # Physics model
-base = ideal(100.0)           # ideal parameters at t = 100 μs
-q    = Q_noisy(t, f_cl, f_sb, A; N=1000, phase_grid=0.0:0.2:π)
+base = ideal(100.0)                       # ideal parameters at t = 100 μs
+
+# Calibration objective: full-L1 fidelity of numMS MS(π/2) gates → (y, σy)
+y, σy = Q_varMS(t, f_cl, f_sb, A; N=1000)
+
+# Alternative Bell-parity estimator (used by the calib_standard examples)
+q = Q_noisy(t, f_cl, f_sb, A; N=1000, phase_grid=0.0:0.2:π)
 
 # Fit heteroscedastic GP
 gp = fit_heterogp(X, y, σy)          # X: d×n, y/σy: n-vectors
@@ -132,5 +136,5 @@ gp = fit_heterogp(X, y, σy)          # X: d×n, y/σy: n-vectors
 x_rec, m_rec, s_rec = recommend_mean(gp, bounds)   # GP-mean maximizer
 
 # Run heteroscedastic GP-UCB
-res = bayesopt_ucb_threshold(f; bounds, n_shots=500, n_init=12, n_iter=100, κ=1.96)
+res = bayesopt_ucb(f; bounds, n_shots=500, n_init=12, n_iter=100, κ=1.96)
 ```

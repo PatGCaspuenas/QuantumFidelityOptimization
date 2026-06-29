@@ -19,12 +19,11 @@ function main(; seed=2)
 
     bounds = [(-1.0, 1.0), (-1.0, 1.0)]
 
-    res = CalibrationCode.bayesopt_ucb_threshold(f_noisy;
+    res = CalibrationCode.bayesopt_ucb(f_noisy;
         bounds=bounds,
         n_shots=200,
         n_init=6,
         n_iter=60,
-        κ=2.0,
         seed=seed
     )
 
