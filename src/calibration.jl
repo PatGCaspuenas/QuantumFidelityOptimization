@@ -273,18 +273,14 @@ function varms_weights(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
     return _normalized_population_weights((pops.gg, pops.eg, pops.ge, pops.ee))
 end
 
-# Fidelity to the ideal |DD⟩ outcome: 1 - ½‖p - e_DD‖₁ over (p_ss, p_sd, p_ds, p_dd).
-varms_full_l1_score(w) =
-    clamp(1.0 - 0.5 * (abs(w[1]) + abs(w[2]) + abs(w[3]) + abs(w[4] - 1.0)), 0.0, 1.0)
-
 """
     Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, relative_phase=0.0, phase_drift=0.0) -> (y, σy)
 
 Fidelity observation for a closed-loop sequence of `numMS` MS(π/2) gates,
-targeting all population in |DD⟩. Returns the score `y = 1 - ½‖p - e_DD‖₁` over
-the four populations and the binomial projection-noise std `σy` (on the DD
-outcome). With finite `N` the populations are multinomially sampled; `N=Inf`
-returns the exact Born-rule score with `σy=0`.
+targeting all population in |DD⟩. Returns the score `y = p_dd` (population
+observed in |DD⟩) and the binomial projection-noise std `σy`. With finite `N`
+`p_dd` is estimated from multinomially sampled shots; `N=Inf` returns the
+exact Born-rule population with `σy=0`.
 """
 function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
                  N::Real=1000, numMS::Int=2,
@@ -294,9 +290,9 @@ function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
     n_eval = _shot_count_or_inf(N)
     w = varms_weights(t, f_cl, Δ, I; numMS=numMS,
                       relative_phase=relative_phase, phase_drift=phase_drift)
-    isinf(Float64(n_eval)) && return varms_full_l1_score(w), 0.0
+    isinf(Float64(n_eval)) && return clamp(w[4], 0.0, 1.0), 0.0
     p_dd = w[4]
     σy = sqrt(max(p_dd * (1.0 - p_dd), 0.0) / Float64(n_eval))
     counts = rand(rng, Distributions.Multinomial(Int(n_eval), collect(Float64, w)))
-    return varms_full_l1_score(counts ./ Float64(n_eval)), σy
+    return clamp(counts[4] / Float64(n_eval), 0.0, 1.0), σy
 end
