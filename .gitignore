@@ -1,4 +1,8 @@
-figures/
+figures/*
 *.bak
 *.png
 *.gif
+others/
+docs/
+.DS_Store
+.vscode/

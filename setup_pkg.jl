@@ -70,8 +70,12 @@ end
 println("""
 Setup complete.
 
-To run the project:
-  julia --project=. scripts/opt_qnoisy_3d.jl
+To verify:
+  julia --project=. examples/toy_hetero_2d.jl
+
+To reproduce paper results:
+  bash scripts/run_main.sh
+  julia --project=. scripts/gp_fit_quality_study.jl
 
 To undo the IonSim patch later:
   git -C ~/.julia/dev/IonSim checkout -- src/iontraps.jl
