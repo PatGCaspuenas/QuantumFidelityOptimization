@@ -13,7 +13,7 @@ echo "========================================"
 
 # ── 1. Install juliaup if not present ────────────────────────────────────────
 echo ""
-echo "[1/3] Checking juliaup..."
+echo "[1/4] Checking juliaup..."
 if ! command -v juliaup &>/dev/null; then
     echo "  juliaup not found — installing..."
     curl -fsSL https://install.julialang.org | sh -s -- --yes
@@ -28,7 +28,7 @@ fi
 
 # ── 2. Install and default Julia 1.11.6 ──────────────────────────────────────
 echo ""
-echo "[2/3] Setting up Julia $JULIA_VERSION..."
+echo "[2/4] Setting up Julia $JULIA_VERSION..."
 
 if juliaup list 2>/dev/null | grep -q "^$JULIA_VERSION"; then
     echo "  Julia $JULIA_VERSION already installed."
@@ -53,5 +53,10 @@ echo "  Using: $($JULIA_BIN --version)"
 
 # ── 3. Run Julia package setup ───────────────────────────────────────────────
 echo ""
-echo "[3/3] Running Julia package setup (this may take several minutes)..."
+echo "[3/4] Running Julia package setup (this may take several minutes)..."
 "$JULIA_BIN" --project="$REPO_DIR" "$REPO_DIR/setup_pkg.jl"
+
+# ── 4. Python environment for figure generation (scripts/plots.ipynb) ────────
+echo ""
+echo "[4/4] Setting up Python environment for figure generation..."
+bash "$REPO_DIR/setup_python.sh"

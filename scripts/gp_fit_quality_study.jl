@@ -92,14 +92,12 @@ lb3d = fill(-BOUND_SCALE, 3)
 ub3d = fill( BOUND_SCALE, 3)
 _test_mat = QuasiMonteCarlo.sample(N_TEST, lb3d, ub3d, QuasiMonteCarlo.SobolSample())
 
-# Precompute Q_det and p_dd (DD population) for every test point.
+# Precompute Q_det (= p_dd, the DD population) for every test point.
 # p_dd feeds the exact shot noise variance: σ² = p_dd*(1-p_dd)/N.
-_q_pdd_vec = pmap(1:N_TEST; batch_size=32) do i
-    w = CalibrationCode.varms_weights(_t, _u_to_params(_test_mat[:, i])...)
-    (CalibrationCode.varms_full_l1_score(w), w[4])
-end
-Q_true_arr = Float64[r[1] for r in _q_pdd_vec]
-p_dd_arr   = Float64[r[2] for r in _q_pdd_vec]
+p_dd_arr = Float64[r for r in pmap(1:N_TEST; batch_size=32) do i
+    CalibrationCode.Q_varMS(_t, _u_to_params(_test_mat[:, i])...; N=Inf)[1]
+end]
+Q_true_arr = p_dd_arr
 println(@sprintf("  Q_true: mean=%.4f  min=%.4f  max=%.4f",
                  mean(Q_true_arr), minimum(Q_true_arr), maximum(Q_true_arr)))
 flush(stdout)

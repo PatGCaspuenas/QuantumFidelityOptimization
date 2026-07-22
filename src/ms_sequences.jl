@@ -3,9 +3,7 @@
 # Closed-loop MS subgate pulse construction + IonSim evolution. Used by the
 # Q_varMS estimator in calibration.jl.
 
-const _ODEMod = Base.loaded_modules[Base.PkgId(
-    Base.UUID("1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"), "OrdinaryDiffEq")]
-const Vern7 = _ODEMod.Vern7
+using OrdinaryDiffEqVerner: Vern7
 
 Base.@kwdef struct MSSubgate
     theta::Float64

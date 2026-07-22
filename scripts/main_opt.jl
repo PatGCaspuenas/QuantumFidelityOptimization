@@ -263,7 +263,7 @@ try
 
     println("=== Trace benchmark export ===")
     println("N=$N_SHOTS  seeds=$NUM_SIMS  workers=$(nworkers())  n_init=$N_INIT  n_iter=$N_ITER")
-    println("score_mode=full_l1  kappa=$KAPPA  init_design=latin_hypercube")
+    println("kappa=$KAPPA  init_design=latin_hypercube")
     println("bound_scale=$BOUND_SCALE  freq_span_kHz=$FREQ_SPAN_KHZ")
     println("seeds=$(join(seeds, ","))")
 
@@ -300,7 +300,6 @@ try
         println(io, "n_iter = $N_ITER")
         println(io, "num_sims = $NUM_SIMS")
         println(io, "workers = $(nworkers())")
-        println(io, "score_mode = full_l1")
         println(io, "kappa = $KAPPA")
         println(io, "init_design = latin_hypercube")
         println(io, "bound_scale = $BOUND_SCALE")

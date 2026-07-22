@@ -6,3 +6,5 @@ others/
 docs/
 .DS_Store
 .vscode/
+.venv/
+.ipynb_checkpoints/
