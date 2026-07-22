@@ -3,7 +3,7 @@ Generates figures/paper/contour_2ms.pdf
 
 2D parameter landscape heatmaps for the two-MS_(pi/2) calibration sequence.
 Reads: data/varms_2_heatmap_{axis_x}_{axis_y}.csv
-Score: full_l1 = P_ee (probability of |11> state, deterministic/no shot noise)
+Score: Q_infinity = P_ee (probability of |11> state, deterministic/no shot noise)
 
 Panels (matching Fig. ref{fig:contour}):
   (a) amplitude vs sideband detuning
@@ -39,14 +39,12 @@ plt.rcParams.update({
     "text.usetex": True,
     "text.latex.preamble": r"\usepackage{amsmath}\usepackage{bm}",
 })
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from mpl_toolkits.axes_grid1 import ImageGrid
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
-FIGURE_DIR = REPO_ROOT
+FIGURE_DIR = REPO_ROOT / "figures"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -184,9 +182,7 @@ def draw_panel(ax, axis_x, axis_y, num_ms):
 
     return cf
 
-def main():
-    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-
+def build_figure():
     fig = plt.figure(figsize=(7.4, 2.4))
 
     # Manual axes positions [x0, y0, width, height] in figure fraction.
@@ -227,8 +223,13 @@ def main():
         cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
         cbar.ax.tick_params(labelsize=9)
 
+    return fig
+
+def main():
+    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+    fig = build_figure()
     out = FIGURE_DIR / f"contour_{NUM_MS}ms.pdf"
-    plt.savefig(out)
+    fig.savefig(out)
     print(f"Saved -> {out}")
 
 if __name__ == "__main__":

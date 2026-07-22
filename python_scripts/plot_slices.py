@@ -27,12 +27,13 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════════════════
 # USER SETTINGS
 # ═══════════════════════════════════════════════════════════════════════════════
-_HERE       = os.path.dirname(__file__)
+_HERE       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR    = os.path.join(_HERE, "data")
+FIGURE_DIR  = os.path.join(_HERE, "figures")
 SLICES_CSV  = os.path.join(DATA_DIR, "slices_output.csv")
 METRICS_CSV = os.path.join(DATA_DIR, "gp_fit_quality_3d_2ms.csv")
 NEAR_CSV    = os.path.join(DATA_DIR, "train_near_output.csv")
-OUT_FILE    = os.path.join(_HERE, "slices_plot.pdf")
+OUT_FILE    = os.path.join(FIGURE_DIR, "slices_plot.pdf")
 
 N_PTS_SHOW   = 50
 N_SHOTS_SHOW = None
@@ -101,7 +102,6 @@ def apply_style():
     plt.rcParams.update({
         "text.usetex": True,
         "text.latex.preamble": r"\usepackage{amsmath}\usepackage{bm}\usepackage{xcolor}",
-        "backend": "pdf",   
     })
 
 def ns_label_no_N(ns):
@@ -188,21 +188,7 @@ def draw_panel(ax, panel_df, near_df, ax_key, nshots_use, colors, first_col, pan
     ax.text(x_letter, 0.98, panel_letter, transform=ax.transAxes,
             ha="right", va="top", fontsize=10, fontweight="bold")
 
-def main():
-    apply_style()
-
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--npts",   type=int,          default=N_PTS_SHOW)
-    parser.add_argument("--nshots", type=float, nargs="+", default=N_SHOTS_SHOW)
-    parser.add_argument("--no-rug", dest="rug", action="store_false", default=True)
-    parser.add_argument("--out",    default=OUT_FILE)
-    args = parser.parse_args()
-
-    n_pts    = args.npts
-    out_file = args.out
-
+def build_figure(n_pts=N_PTS_SHOW, nshots=N_SHOTS_SHOW, rug=True):
     df_slices  = pd.read_csv(SLICES_CSV)
     df_metrics = pd.read_csv(METRICS_CSV)
 
@@ -221,11 +207,11 @@ def main():
         raise SystemExit(f"No slice data for n_pts={n_pts}.")
 
     avail_nshots = sorted(sub["N_shots"].unique())
-    nshots_use = [ns for ns in args.nshots if ns in avail_nshots] if args.nshots else avail_nshots
+    nshots_use = [ns for ns in nshots if ns in avail_nshots] if nshots else avail_nshots
     colors = assign_colors(nshots_use)
 
     near_df = None
-    if args.rug and os.path.isfile(NEAR_CSV):
+    if rug and os.path.isfile(NEAR_CSV):
         df_near = pd.read_csv(NEAR_CSV)
         near_df = df_near[(df_near["n_pts"] == n_pts) & df_near.apply(_is_median, axis=1)]
 
@@ -315,9 +301,24 @@ def main():
     y_top_row = bbox.y0 + (bbox.y1 - bbox.y0) * 0.75
     fig.text(bbox.x0 - 0.01, y_top_row, r"$N$", ha="right", va="center", fontsize=10)
 
-    Path(out_file).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_file, bbox_inches="tight")
-    print(f"Saved → {out_file}")
+    return fig
+
+def main():
+    apply_style()
+
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--npts",   type=int,          default=N_PTS_SHOW)
+    parser.add_argument("--nshots", type=float, nargs="+", default=N_SHOTS_SHOW)
+    parser.add_argument("--no-rug", dest="rug", action="store_false", default=True)
+    parser.add_argument("--out",    default=OUT_FILE)
+    args = parser.parse_args()
+
+    fig = build_figure(n_pts=args.npts, nshots=args.nshots, rug=args.rug)
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(args.out, bbox_inches="tight")
+    print(f"Saved → {args.out}")
 
 if __name__ == "__main__":
     main()

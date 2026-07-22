@@ -1,7 +1,7 @@
 """
 Generates figures/paper/figure_ab_vertical.png with two panels:
   Panel A: infidelity convergence curves for three search-box scales (N=Inf).
-  Panel B: infidelity convergence curves for five shot counts (full_l1, scale=0.5).
+  Panel B: infidelity convergence curves for five shot counts (scale=0.5).
 """
 
 import glob
@@ -42,24 +42,21 @@ mpl.rcParams.update({
 plt.rcParams.update({
     "text.usetex": True,
     "text.latex.preamble": r"\usepackage{amsmath}\usepackage{bm}\usepackage{xcolor}",
-    "backend": "pdf",   
 })
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).resolve().parent
-print(f"Repo root: {REPO_ROOT}")
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
-FIGURE_DIR = REPO_ROOT 
+FIGURE_DIR = REPO_ROOT / "figures"
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 MAX_ITER = 100
 TRACE_INFLOOR = 1e-10
-SCALE_INFLOOR = 1e-10  
-SELECTED_Y_FLOOR = 1e-7
+SCALE_INFLOOR = 1e-10
 SCALE_DROP_FAILURES = True
 SCALE_FAILURE_Q_THRESHOLD = 0.99
 
@@ -75,20 +72,20 @@ SCALE_GROUPS = [
     {
         "label": "0.1",
         "color": "#648FFF",        # Aesthetic vibrant light blue
-        "ls": ":",                 
-        "dir": DATA_DIR / "traces_freqspan10_bound010_NInf_lhs12_restart_fullbudget100_100seeds",
+        "ls": ":",
+        "dir": DATA_DIR / "traces_freqspan10_bound010_NInf_nostop100_stream_100seeds",
     },
     {
         "label": "0.5",
         "color": magma_colors[0],  # Absolute darkest (Matches N=Inf exactly)
-        "ls": "-",                
-        "dir": DATA_DIR / "traces_freqspan10_bound050_NInf_lhs12_restart_fullbudget100_100seeds",
+        "ls": "-",
+        "dir": DATA_DIR / "traces_freqspan10_bound050_NInf_nostop100_stream_100seeds",
     },
     {
         "label": "1.0",
         "color": "#005AB5",        # Aesthetic rich deep blue
-        "ls": "--",                 
-        "dir": DATA_DIR / "traces_freqspan10_bound100_NInf_lhs12_restart_fullbudget100_100seeds",
+        "ls": "--",
+        "dir": DATA_DIR / "traces_freqspan10_bound100_NInf_nostop100_stream_100seeds",
     },
 ]
 
@@ -152,8 +149,8 @@ def forward_fill_infid(trace, max_iter: int = MAX_ITER, floor: float = TRACE_INF
 def trace_matrix(traces, floor: float = TRACE_INFLOOR) -> np.ndarray:
     return np.vstack([forward_fill_infid(t, floor=floor) for t in traces])
 
-def full_l1_trace_dir(n_label: str) -> Path:
-    return DATA_DIR / f"traces_freqspan10_bound050_full_l1_N{n_label}_nostop100_stream_100seeds"
+def trace_dir_for_n(n_label: str) -> Path:
+    return DATA_DIR / f"traces_freqspan10_bound050_N{n_label}_nostop100_stream_100seeds"
 
 def model_dash_infid(n_label: str) -> float:
     return MODEL_DASH_EPS_INF + MODEL_DASH_A * float(n_label) ** (-MODEL_DASH_ALPHA)
@@ -244,7 +241,7 @@ def draw_selected_n_trend(ax):
 
     for n_label in N_LABELS:
         try:
-            traces = read_trace_group(full_l1_trace_dir(n_label))
+            traces = read_trace_group(trace_dir_for_n(n_label))
         except FileNotFoundError as e:
             print(f"  Skipping N={n_label}: {e}", file=sys.stderr)
             continue
@@ -281,9 +278,7 @@ def add_side_title(ax, leg, text):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-
+def build_figure():
     fig, (ax_scale, ax_selected) = plt.subplots(
         2, 1,
         gridspec_kw={'height_ratios': [1, 1]},
@@ -374,9 +369,13 @@ def main():
     # Add the N title outside the master box
     add_side_title(ax_selected, leg_b1, r"$N$")
 
-    # Output
+    return fig
+
+def main():
+    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+    fig = build_figure()
     out = FIGURE_DIR / "figure_ab_vertical.pdf"
-    plt.savefig(out)
+    fig.savefig(out)
     print(f"Saved → {out}")
 
 if __name__ == "__main__":

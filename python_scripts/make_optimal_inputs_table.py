@@ -13,32 +13,30 @@ for each of the three normalised inputs u1 (Δf_cl), u2 (Δf_sb), u3 (ΔA).
 
 import glob
 import csv
-import os
-import sys
 import numpy as np
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Paths  (mirror plot_figure_ab_vertical.py)
 # ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR  = REPO_ROOT / "data"
 
 SCALE_GROUPS = [
     {"label": "scale = 0.1",
-     "dir": DATA_DIR / "traces_freqspan10_bound010_NInf_lhs12_restart_fullbudget100_100seeds"},
+     "dir": DATA_DIR / "traces_freqspan10_bound010_NInf_nostop100_stream_100seeds"},
     {"label": "scale = 0.5",
-     "dir": DATA_DIR / "traces_freqspan10_bound050_NInf_lhs12_restart_fullbudget100_100seeds"},
+     "dir": DATA_DIR / "traces_freqspan10_bound050_NInf_nostop100_stream_100seeds"},
     {"label": "scale = 1.0",
-     "dir": DATA_DIR / "traces_freqspan10_bound100_NInf_lhs12_restart_fullbudget100_100seeds"},
+     "dir": DATA_DIR / "traces_freqspan10_bound100_NInf_nostop100_stream_100seeds"},
 ]
 
 N_GROUPS = [
-    {"label": "N = 100",   "dir": DATA_DIR / "traces_freqspan10_bound050_full_l1_N100_nostop100_stream_100seeds"},
-    {"label": "N = 1000",  "dir": DATA_DIR / "traces_freqspan10_bound050_full_l1_N1000_nostop100_stream_100seeds"},
-    {"label": "N = 10k",   "dir": DATA_DIR / "traces_freqspan10_bound050_full_l1_N10000_nostop100_stream_100seeds"},
-    {"label": "N = 100k",  "dir": DATA_DIR / "traces_freqspan10_bound050_full_l1_N100000_nostop100_stream_100seeds"},
-    {"label": "N = Inf",   "dir": DATA_DIR / "traces_freqspan10_bound050_full_l1_NInf_nostop100_stream_100seeds"},
+    {"label": "N = 100",   "dir": DATA_DIR / "traces_freqspan10_bound050_N100_nostop100_stream_100seeds"},
+    {"label": "N = 1000",  "dir": DATA_DIR / "traces_freqspan10_bound050_N1000_nostop100_stream_100seeds"},
+    {"label": "N = 10k",   "dir": DATA_DIR / "traces_freqspan10_bound050_N10000_nostop100_stream_100seeds"},
+    {"label": "N = 100k",  "dir": DATA_DIR / "traces_freqspan10_bound050_N100000_nostop100_stream_100seeds"},
+    {"label": "N = Inf",   "dir": DATA_DIR / "traces_freqspan10_bound050_NInf_nostop100_stream_100seeds"},
 ]
 
 INPUT_COLS  = ["x_rec_u1", "x_rec_u2", "x_rec_u3"]

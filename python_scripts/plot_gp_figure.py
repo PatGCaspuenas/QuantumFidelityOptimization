@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Generates figures/paper/figure_fcl_amp_n100_gpzoom.pdf
+Generates figure_fcl_amp_n100_gpzoom.pdf
 
-3×3 figure for N=100 BO traces (scale=0.5, full_l1):
-  Row 1 — 1D GP posterior slices along fcl, fsb, amp for multiple iterations (10, 50, 100).
+3x2 figure for N=100 BO traces (scale=0.5):
+  Row 1 — 1D GP posterior slices along fsb, amp at iterations 10, 30, 50.
   Row 2 — 2D scatter of acquisition samples (x_acq) across all seeds and iters.
   Row 3 — 2D scatter of recommended best point (x_rec) across all seeds and iters.
 
@@ -11,8 +11,7 @@ Features:
   - Columns share x-axes (fcl, fsb, amp).
   - Y-axes for rows 2 and 3 cycle through the combinations to show all 2D pairings.
   - True Q_det landscape is overlaid on the 2D plots using black contour lines with labels.
-  - Transparent scatter points reveal raw distributions.h
-  - Training points near the slice are shown as a red square rug at the bottom.
+  - Transparent scatter points reveal raw distributions.
   - Fuzzy GP variance shown for ALL iterations.
   - Custom ticks and dotted gridlines applied.
 """
@@ -26,7 +25,6 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as mgridspec
 import matplotlib.ticker as mticker
-import matplotlib.transforms as mtransforms
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from scipy.stats import norm as sp_norm
@@ -53,7 +51,6 @@ mpl.rcParams.update({
 plt.rcParams.update({
     "text.usetex": True,
     "text.latex.preamble": r"\usepackage{amsmath}\usepackage{bm}\usepackage{xcolor}",
-    "backend": "pdf",   
 })
 
 # Extract 3 distinct colors from the magma palette for the GP iterations
@@ -63,27 +60,22 @@ COLORS_GP = [magma_cols[1], magma_cols[3], magma_cols[4]]
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR  = REPO_ROOT / "data"
-FIGURE_DIR = REPO_ROOT
+FIGURE_DIR = REPO_ROOT / "figures"
 
-GP_STEM         = "scale05_selectedN_full_l1_avg5_gp_slices_iters10_30_50_100"
+GP_STEM         = "scale05_selectedN_gp_slices_iters10_30_50"
 GP_SLICES_FILE  = DATA_DIR / "gp_slices" / f"{GP_STEM}.csv"
-TRAINING_FILE   = DATA_DIR / "gp_slices" / f"{GP_STEM}_training_points.csv"
-TRUE_SCORE_FILE = DATA_DIR / "score_cache" / "scale05_true_2ms_full_l1_slices_freqspan10_grid201.csv"
-
-GRID_N = int(os.environ.get("GRID3D_N", "21"))
-GRID3D_FILE = DATA_DIR / "score_cache" / f"scale05_true_2ms_full_l1_3d_bound050_grid{GRID_N}.csv"
+TRUE_SCORE_FILE = DATA_DIR / "score_cache" / "scale05_true_2ms_slices_freqspan10_grid201.csv"
 
 def trace_dir_path(n_label):
-    return DATA_DIR / f"traces_freqspan10_bound050_full_l1_N{n_label}_nostop100_stream_100seeds"
+    return DATA_DIR / f"traces_freqspan10_bound050_N{n_label}_nostop100_stream_100seeds"
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 N_FOCUS       = os.environ.get("PLOT_N_FOCUS", "100")
 ITER_GPS      = [10, 30, 50]
-SELECTED_RANK = 1        
 
 FREQ_SPAN_KHZ  = 10.0   
 AMP_SPAN_RATIO = 0.2    
@@ -156,7 +148,7 @@ def load_true_score():
     out = {}
     for ax in AXES_1D:
         rs = sorted(
-            [r for r in rows if r["axis"] == ax and r.get("score_mode", "full_l1") == "full_l1"],
+            [r for r in rows if r["axis"] == ax],
             key=lambda r: float(r["x_physical"]),
         )
         if ax == "amp":
@@ -168,136 +160,59 @@ def load_true_score():
     return out
 
 def load_gp_slices():
+    """Average the N_SEEDS_FOR_AVERAGE seeds' GP curves at each grid point,
+    combining within-seed GP uncertainty and between-seed spread:
+        sigma_total^2 = mean(sigma_i^2) + var(mu_i)
+    """
     rows = read_csv_file(GP_SLICES_FILE)
     out = {ax: {} for ax in AXES_1D}
     for ax in AXES_1D:
         for it in ITER_GPS:
-            rs = sorted(
-                [r for r in rows
-                 if r["N"] == N_FOCUS
-                 and r["axis"] == ax
-                 and int(r["selected_rank"]) == SELECTED_RANK
-                 and int(r["iter"]) == it],
-                key=lambda r: float(r["x_physical"]),
-            )
-            if rs:
-                if ax == "amp":
-                    x_phys = np.array([1.0 + 0.2 * float(r["x_u"]) for r in rs])
-                else:
-                    x_phys = np.array([float(r["x_physical"]) for r in rs])
-                    
-                out[ax][it] = (x_phys,
-                               np.array([float(r["mu"]) for r in rs]),
-                               np.array([float(r["sigma"]) for r in rs]))
+            rs = [r for r in rows
+                  if r["N"] == N_FOCUS and r["axis"] == ax and int(r["iter"]) == it]
+            if not rs:
+                continue
+            grouped = {}
+            for r in rs:
+                grouped.setdefault(float(r["x_u"]), []).append(r)
+            xs = sorted(grouped)
+            mus, sigmas = [], []
+            for x_u in xs:
+                mu_vals = np.array([float(r["mu"]) for r in grouped[x_u]])
+                sig_vals = np.array([float(r["sigma"]) for r in grouped[x_u]])
+                mus.append(mu_vals.mean())
+                sigmas.append(np.sqrt(max((sig_vals ** 2).mean() + mu_vals.var(), 0.0)))
+            if ax == "amp":
+                x_phys = np.array([1.0 + 0.2 * x_u for x_u in xs])
+            else:
+                phys_by_u = {float(r["x_u"]): float(r["x_physical"]) for r in rs}
+                x_phys = np.array([phys_by_u[x_u] for x_u in xs])
+            out[ax][it] = (x_phys, np.array(mus), np.array(sigmas))
     return out
 
-def load_training_points():
-    rows = read_csv_file(TRAINING_FILE)
-    rs = [r for r in rows
-          if r["N"] == N_FOCUS
-          and int(r["selected_rank"]) == SELECTED_RANK
-          and int(r["iter"]) == ITER_GPS[-1]]
-    if not rs:
-        return None
-    return {
-        "u1": np.array([float(r["x_u1"]) for r in rs]),
-        "u2": np.array([float(r["x_u2"]) for r in rs]),
-        "u3": np.array([float(r["x_u3"]) for r in rs]),
-        "fcl": np.array([u_to_phys("fcl", r["x_u1"]) for r in rs]),
-        "fsb": np.array([u_to_phys("fsb", r["x_u2"]) for r in rs]),
-        "amp": np.array([u_to_phys("amp", r["x_u3"]) for r in rs]),
-        "y":   np.array([float(r["y"])                for r in rs]),
-    }
-
-def get_near_train_pts(train_pts, ax_key, tol=0.1):
-    """Return (coords, original_indices) for training points near the 1D slice."""
-    u1, u2, u3 = train_pts["u1"], train_pts["u2"], train_pts["u3"]
-    if ax_key == "fcl":
-        mask = np.sqrt(u2**2 + u3**2) < tol
-    elif ax_key == "fsb":
-        mask = np.sqrt(u1**2 + u3**2) < tol
-    elif ax_key == "amp":
-        mask = np.sqrt(u1**2 + u2**2) < tol
-    else:
-        return np.array([]), np.array([], dtype=int)
-    return train_pts[ax_key][mask], np.where(mask)[0]
-
-_3D_U_COL   = {"fcl": "u1",         "fsb": "u2",         "amp": "u3"}
-_3D_PHY_COL = {"fcl": "x_fcl_khz",  "fsb": "x_fsb_khz",  "amp": "x_amp_ratio"}
-
 def load_contour_2d(ax_x, ax_y):
-    """Return (x_phys, y_phys, score) for the 2D contour landscape.
-
-    Primary: central slice through the 3D score grid — physically correct at the
-    actual scale=0.5 coordinates (±5 kHz, [0.9, 1.1]).
-    Fallback: varms_2 heatmap CSVs rescaled from their scale=1 scan ranges.
+    """Return (x_phys, y_phys, score) for the 2D contour landscape, from the
+    varms_2 heatmap CSVs. The heatmap's own scan already spans ±10 kHz
+    (fcl/sideband) and [0.8, 1.2] (rabi_ratio = A/A_opt directly, no rescale
+    needed) -- comfortably wider than the scale=0.5 window (±5 kHz, [0.9,1.1])
+    these panels display, so no rescaling is needed either: just convert with
+    the same factor plot_contour.py uses and let the existing axis limits
+    (AXIS_LIMS, applied via set_xlim/set_ylim) crop the view to scale=0.5.
     """
-    if GRID3D_FILE.exists():
-        return _load_3d_slice(ax_x, ax_y)
-    return _load_heatmap_scaled(ax_x, ax_y)
-
-def _load_3d_slice(ax_x, ax_y):
-    """Central (u=0) slice of the 3D score grid. No coordinate transformation needed."""
-    all_axes = {"fcl", "fsb", "amp"}
-    fixed_axis = (all_axes - {ax_x, ax_y}).pop()
-    fixed_u_col = _3D_U_COL[fixed_axis]
-
-    rows = read_csv_file(GRID3D_FILE)
-    u_vals = sorted({float(r[fixed_u_col]) for r in rows})
-    u_center = min(u_vals, key=abs)            # grid value closest to 0
-    tol = (u_vals[1] - u_vals[0]) * 0.5 if len(u_vals) > 1 else 1e-9
-    slice_rows = [r for r in rows if abs(float(r[fixed_u_col]) - u_center) < tol]
-
-    x = np.array([float(r[_3D_PHY_COL[ax_x]]) for r in slice_rows])
-    y = np.array([float(r[_3D_PHY_COL[ax_y]]) for r in slice_rows])
-    # amp column stores ΔA/A_opt; display axis uses A/A_opt = 1 + ΔA/A_opt
-    if ax_x == "amp":
-        x = 1.0 + x
-    if ax_y == "amp":
-        y = 1.0 + y
-    z = np.array([float(r["score"]) for r in slice_rows])
-    return x, y, z
-
-# ---------------------------------------------------------------------------
-# Fallback: varms_2 heatmap CSVs (scale=1 generation, rescaled to scale=0.5)
-# ---------------------------------------------------------------------------
-# Heatmap scan ranges at generation time (BOUND_SCALE=1.0):
-#   fcl/sideband: ±2 kHz  →  rescale to ±(FREQ_SPAN_KHZ × BOUND_SCALE) = ±5 kHz
-#   rabi_ratio:   [0.8, 1.2]  →  rescale to [1-AMP_SPAN×BS, 1+AMP_SPAN×BS] = [0.9, 1.1]
-_CONTOUR_FREQ_RANGE = 2.0   # half-span of the original scan in kHz
-_FREQ_COORD_SCALE   = (FREQ_SPAN_KHZ * BOUND_SCALE) / _CONTOUR_FREQ_RANGE   # = 2.5
-_AMP_COORD_SCALE    = BOUND_SCALE                                             # = 0.5
-
-def _heatmap_coord_scale(col_name, val):
-    if col_name in ("fcl_2pi_khz", "sideband_2pi_khz"):
-        return val * _FREQ_COORD_SCALE
-    if col_name == "rabi_ratio":
-        return 1.0 + (val - 1.0) * _AMP_COORD_SCALE
-    return val
-
-def _load_heatmap_scaled(ax_x, ax_y):
+    FREQ_SCALE = 5.0   # matches plot_contour.py: stored units are 2pi kHz
     for (kx, ky), (suffix, col_x, col_y) in HEATMAP_MAP.items():
         if {kx, ky} == {ax_x, ax_y}:
             path = DATA_DIR / f"varms_2_heatmap_{suffix}.csv"
             rows = [r for r in read_csv_file(path) if r.get("scan_kind", "heatmap") == "heatmap"]
             cx = col_x if ax_x == kx else col_y
             cy = col_y if ax_y == ky else col_x
-            x = np.array([_heatmap_coord_scale(cx, float(r[cx])) for r in rows])
-            y = np.array([_heatmap_coord_scale(cy, float(r[cy])) for r in rows])
+            scale_x = FREQ_SCALE if cx in ("fcl_2pi_khz", "sideband_2pi_khz") else 1.0
+            scale_y = FREQ_SCALE if cy in ("fcl_2pi_khz", "sideband_2pi_khz") else 1.0
+            x = np.array([float(r[cx]) * scale_x for r in rows])
+            y = np.array([float(r[cy]) * scale_y for r in rows])
             z = np.array([float(r["score"]) for r in rows])
             return x, y, z
     raise KeyError(f"No mapping for {ax_x}, {ax_y}")
-
-def _row_score(row, candidates):
-    """Return the first parseable score value from a list of candidate column names."""
-    for col in candidates:
-        v = row.get(col)
-        if v is not None:
-            try:
-                return float(v)
-            except (ValueError, TypeError):
-                pass
-    return np.nan
 
 def load_all_traces(n_label):
     d = trace_dir_path(n_label)
@@ -314,8 +229,8 @@ def load_all_traces(n_label):
             ru1.append(float(row["x_rec_u1"]))
             ru2.append(float(row["x_rec_u2"]))
             ru3.append(float(row["x_rec_u3"]))
-            ay.append(_row_score(row, ["y_acq", "score_noisy", "y", "score"]))
-            ry.append(_row_score(row, ["y_rec", "score_rec", "score_best", "score_det", "score"]))
+            ay.append(float(row["y_acq"]))
+            ry.append(float(row["q_det_rec"]))
     acq = {"u1": np.array(au1), "u2": np.array(au2), "u3": np.array(au3),
            "score": np.array(ay)}
     rec = {"u1": np.array(ru1), "u2": np.array(ru2), "u3": np.array(ru3),
@@ -346,7 +261,7 @@ def _fuzzy_gradient_fill(ax, u, mu, sig, color, zorder=2):
         ax.fill_between(u, lower, upper, color=color, alpha=base_alpha,
                         linewidth=0, edgecolor="none", zorder=zorder)
 
-def draw_1d_slice(ax, axis, true_data, gp_data, train_pts, show_ylabel):
+def draw_1d_slice(ax, axis, true_data, gp_data, show_ylabel):
     # Add Gridlines
     ax.grid(True, which="major", color="#cccccc", linestyle=":", linewidth=0.8, zorder=0)
 
@@ -361,24 +276,6 @@ def draw_1d_slice(ax, axis, true_data, gp_data, train_pts, show_ylabel):
                 ax.plot(x_gp, np.clip(mu, 0, 1), color=COLORS_GP[i], lw=1.5, zorder=3)
                 # Apply fuzzy fill to all requested iterations
                 _fuzzy_gradient_fill(ax, x_gp, mu, sig, COLORS_GP[i], zorder=2)
-
-    if train_pts is not None:
-        near_x, near_idx = get_near_train_pts(train_pts, axis, tol=0.1)
-        if len(near_x) > 0:
-            trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
-            # Split chronologically: first 10 (LHS init), next 20, last 20
-            # and colour each batch by a distinct magma shade
-            _cmap = mpl.colormaps.get_cmap("magma")
-            batches = [(0, 10, _cmap(0.20)),
-                       (10, 30, _cmap(0.55)),
-                       (30, len(train_pts["u1"]), _cmap(0.68))]
-            for b_start, b_end, b_color in batches:
-                sel = (near_idx >= b_start) & (near_idx < b_end)
-                if sel.any():
-                    ax.plot(near_x[sel], np.full(sel.sum(), 0.03),
-                            marker='|', markersize=7, markeredgewidth=1.2,
-                            color=b_color, alpha=0.85, linestyle='none',
-                            zorder=10, transform=trans, clip_on=False)
 
     ax.set_xlim(*AXIS_LIMS[axis])
     ax.set_ylim(0.5, 1.0)
@@ -458,9 +355,7 @@ def add_panel_label(ax, label, x=-0.10):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-
+def build_figure():
     true_data = load_true_score()
     gp_data   = load_gp_slices()
     acq_data, rec_data = load_all_traces(N_FOCUS)
@@ -492,7 +387,7 @@ def main():
     # Row 1: 1D GP slices (fsb and amp only; rug marks omitted)
     for col, axis in enumerate(ROW1_AXES):
         ax = axes[0, col]
-        draw_1d_slice(ax, axis, true_data, gp_data, None, show_ylabel=(col == 0))
+        draw_1d_slice(ax, axis, true_data, gp_data, show_ylabel=(col == 0))
         add_panel_label(ax, PANEL_LABELS[0][col], x=(-0.30 if col == 0 else -0.10))
 
     # Rows 2 & 3: 2D scatter with box (square) aspect ratio
@@ -546,8 +441,13 @@ def main():
     fig.text(left_x_frac, row1_y_frac, r"$n$",
              fontsize=9, ha="right", va="center")
 
+    return fig
+
+def main():
+    FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+    fig = build_figure()
     out = FIGURE_DIR / f"figure_fcl_amp_n{N_FOCUS}_gpzoom.pdf"
-    plt.savefig(out)
+    fig.savefig(out)
     print(f"Saved -> {out}")
 
 if __name__ == "__main__":

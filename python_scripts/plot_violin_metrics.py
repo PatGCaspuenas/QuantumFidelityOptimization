@@ -26,10 +26,10 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════════════════
 # USER SETTINGS
 # ═══════════════════════════════════════════════════════════════════════════════
-_HERE    = os.path.dirname(__file__)
-DATA_DIR = os.path.join(_HERE,  "data")
-CSV_FILE = os.path.join(DATA_DIR, "gp_fit_quality_3d_2ms.csv")
-OUT_FILE = os.path.join(_HERE, "violin_rmse_msse.pdf")
+_HERE       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR    = os.path.join(_HERE, "data")
+FIGURE_DIR  = os.path.join(_HERE, "figures")
+CSV_FILE    = os.path.join(DATA_DIR, "gp_fit_quality_3d_2ms.csv")
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _magma_palette(n):
@@ -57,7 +57,6 @@ def apply_style():
     plt.rcParams.update({
         "text.usetex": True,
         "text.latex.preamble": r"\usepackage{amsmath}\usepackage{bm}\usepackage{xcolor}",
-        "backend": "pdf",   
     })
 
 
@@ -177,30 +176,15 @@ def _legend_npts(fig, npts_color, npts_vals):
     _place_legend(fig, h)
 
 
-def main():
-    apply_style()
-
-    parser = argparse.ArgumentParser(description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--msse", default="msse_gp",
-                        choices=["msse_gp", "msse_adj", "msse_pred"],
-                        help="MSSE variant")
-    parser.add_argument("--out-rmse", default=os.path.join(_HERE, "violin_rmse.pdf"))
-    parser.add_argument("--out-msse", default=os.path.join(_HERE, "violin_msse.pdf"))
-    args = parser.parse_args()
-
+def build_figures(msse_variant="msse_gp"):
     df = pd.read_csv(CSV_FILE, encoding="utf-8")
 
-    _msse_map = {"msse_gp": "msse_gp", "msse_adj": "msse", "msse_pred": "msse_pred"}
-    msse_col  = _msse_map[args.msse]
+    msse_col = "msse_gp" if msse_variant == "msse_gp" else "msse"
 
     npts_vals   = sorted(df["n_pts"].unique())
     nshots_vals = sorted(df["N_shots"].unique())
     colors      = _magma_palette(len(npts_vals))
     npts_color  = {n: colors[i] for i, n in enumerate(npts_vals)}
-
-    sigma_col = next((c for c in ["mean_σ_Q", "mean_sigma_Q", "mean_sigma_noise"]
-                      if c in df.columns), None)
 
     n_v      = len(npts_vals)
     v_gap    = 0.18
@@ -221,13 +205,12 @@ def main():
     for g_idx, nshots in enumerate(nshots_vals):
         gc = group_xs[g_idx]
         # σ_ε dashed line per N_shots group
-        if sigma_col:
-            s_vals = df.loc[df["N_shots"] == nshots, sigma_col].dropna().values
-            if len(s_vals):
-                xmin = gc + offsets[0]  - half_vw * 1.5
-                xmax = gc + offsets[-1] + half_vw * 1.5
-                ax1.hlines(np.median(s_vals), xmin, xmax,
-                           color="0.3", linestyle="--", linewidth=1.2, zorder=3)
+        s_vals = df.loc[df["N_shots"] == nshots, "mean_sigma_noise"].dropna().values
+        if len(s_vals):
+            xmin = gc + offsets[0]  - half_vw * 1.5
+            xmax = gc + offsets[-1] + half_vw * 1.5
+            ax1.hlines(np.median(s_vals), xmin, xmax,
+                       color="0.3", linestyle="--", linewidth=1.2, zorder=3)
         for v_idx, npts in enumerate(npts_vals):
             xpos = gc + offsets[v_idx]
             mask = (df["N_shots"] == nshots) & (df["n_pts"] == npts)
@@ -241,15 +224,9 @@ def main():
     # Legend: n_pts patches + σ_ε dashed line
     from matplotlib.lines import Line2D
     h_npts = [Patch(facecolor=npts_color[n], alpha=0.85, label=rf"${n}$") for n in npts_vals]
-    h_sigma = ([Line2D([0], [0], color="0.3", ls="--", lw=1.2,
-                        label=r"$\bar{\sigma}_\varepsilon$")]
-               if sigma_col else [])
+    h_sigma = [Line2D([0], [0], color="0.3", ls="--", lw=1.2, label=r"$\bar{\sigma}_\varepsilon$")]
     _place_legend(fig1, h_npts + h_sigma,
                   ncol=min(4, len(h_npts) + len(h_sigma)))
-    Path(args.out_rmse).parent.mkdir(parents=True, exist_ok=True)
-    fig1.savefig(args.out_rmse)
-    print(f"Saved → {args.out_rmse}")
-    plt.close(fig1)
 
     # ═══════════════════════════════════════════════════════════════════════
     # Figure 2 — MSSE  (no sigma lines, current legend)
@@ -274,6 +251,28 @@ def main():
     ax2.set_ylabel(r"$\mathrm{MSSE}$")
 
     _legend_npts(fig2, npts_color, npts_vals)
+
+    return fig1, fig2
+
+def main():
+    apply_style()
+
+    parser = argparse.ArgumentParser(description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--msse", default="msse_gp",
+                        choices=["msse_gp", "msse_adj"],
+                        help="MSSE variant")
+    parser.add_argument("--out-rmse", default=os.path.join(FIGURE_DIR, "violin_rmse.pdf"))
+    parser.add_argument("--out-msse", default=os.path.join(FIGURE_DIR, "violin_msse.pdf"))
+    args = parser.parse_args()
+
+    fig1, fig2 = build_figures(msse_variant=args.msse)
+
+    Path(args.out_rmse).parent.mkdir(parents=True, exist_ok=True)
+    fig1.savefig(args.out_rmse)
+    print(f"Saved → {args.out_rmse}")
+    plt.close(fig1)
+
     Path(args.out_msse).parent.mkdir(parents=True, exist_ok=True)
     fig2.savefig(args.out_msse)
     print(f"Saved → {args.out_msse}")
