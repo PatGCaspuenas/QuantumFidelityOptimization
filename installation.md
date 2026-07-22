@@ -5,6 +5,8 @@
 - Linux or macOS
 - `curl` and `git` (pre-installed on both)
 - Internet access (for juliaup and package downloads)
+- Python >= 3.12 (checked by `setup_python.sh`; needed by the pinned `numpy`/`scipy` versions in `requirements.txt`)
+- A LaTeX distribution providing `pdflatex` and `dvipng` on `PATH` (checked by `setup_python.sh`, warns but doesn't install automatically — see below). Required because every figure script sets matplotlib's `text.usetex=True`; without it, `scripts/plots.ipynb` fails when rendering figure text.
 
 ## Automated setup (recommended)
 
@@ -34,7 +36,7 @@ All paper figures are generated from `scripts/plots.ipynb`, which needs `matplot
 bash setup_python.sh
 ```
 
-This creates a `.venv/` virtual environment at the repo root, installs the exact pinned versions from `requirements.txt` (a full `pip freeze` lock, so re-running it always reproduces the same environment), and registers a Jupyter kernel named `qfo-venv` (display name "Python 3 (QuantumFidelityOptimization)") so the notebook runs with the right environment out of the box.
+This checks your Python version (>= 3.12) and warns if `pdflatex`/`dvipng` aren't found (install commands are printed for Debian/Ubuntu and macOS), then creates a `.venv/` virtual environment at the repo root, installs the exact pinned versions from `requirements.txt` (a full `pip freeze` lock, so re-running it always reproduces the same environment), and registers a Jupyter kernel named `qfo-venv` (display name "Python 3 (QuantumFidelityOptimization)") so the notebook runs with the right environment out of the box.
 
 Activate the environment with:
 
