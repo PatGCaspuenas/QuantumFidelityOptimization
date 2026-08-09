@@ -1,18 +1,43 @@
 # QuantumFidelityOptimization
 
-## Overview
+This repository implements heteroscedastic Gaussian Process Bayesian Optimization (GP-UCB) for calibrating trapped-ion Mølmer–Sørensen (MS) gates. It is the code and data behind *Active Learning for Calibrating Entangling Gates via Surrogate-Based Optimization* ([arXiv:2607.00284](https://arxiv.org/abs/2607.00284)).
 
-This repository implements heteroscedastic Gaussian Process Bayesian Optimization (GP-UCB) for calibrating trapped-ion Mølmer–Sørensen (MS) gates.
+<p align="center">
+  <img src="images/schematic_final.png" width="700" alt="Active learning pipeline for gate calibration">
+</p>
 
-The calibration objective is **p_dd**, the population measured in the target |DD⟩ outcome:
+## Methodology
+
+The optimizer sequentially learns the unknown mapping from control parameters to the noisy score while aiming to maximize the gate fidelity by querying the quantum device only in the outer loop. Starting from 12 Latin-hypercube input points over the design space, each iteration $n$ performs four steps:
+
+1. **Query the quantum system.** The calibration sequence is run at a candidate control vector $\bm{x}=(\Omega, \delta, \omega_{\mathrm{cl}})$ (Rabi frequency, sideband detuning, center-line detuning) with $N$ measurement shots that return a noisy score `Q = f(x) + ε(x, N)`. Only this score is observed.
+2. **Fit the surrogate.** A Gaussian process with a Matérn-3/2 ARD kernel is conditioned on all measurements collected so far, each carrying its own known measurement variance (see [noise model](#calibration-system-and-noise-model)). The posterior gives a prediction mean $\hat{\mu}(\bm{x})$ and standard deviation $\hat{\sigma}(\bm{x})$ anywhere in the input space. Kernel hyperparameters are re-fit by marginal-likelihood maximization every `HYPER_EVERY = 10` iterations rather than at every step.
+3. **Optimize the surrogate.** Through $\bm{x}^* = \text{arg max}_{\bm{x}} \:\hat{\mu}(\bm{x})$, the optimizer finds the maximum fidelity estimated by the surrogate. The optimization consists on a dense random search followed by L-BFGS on the top candidates as initial guesses. 
+4. **Select the next measurement (active learning).** The next control vector maximizes the GP-UCB acquisition $\alpha\left(\cdot \right) = \hat{\mu}(\bm{x}) + \kappa \hat{\sigma}(\bm{x})$ with $\kappa = 1.96$, trading exploitation of the predicted optimum against exploration of uncertain regions. The selected point is measured by the system and appended to the training set of the surrogate. The loop repeats until the iteration budget is spent.
+
+## Calibration system and noise model
+
+<p align="center">
+  <img src="images/contour_2ms.png" width="700" alt="Two-parameter Q∞ landscapes of the 2×MS(π/2) sequence">
+</p>
+
+a) **The system.** Two ions with a qubit transition frequency $\omega_{\mathrm{cl}}$ and a shared motional mode with frequency $\omega_m$ can be entangled with a bichromatic laser field with frequencies $\omega_{b,r} = \omega_{\mathrm{cl}} \pm (\omega_m + \delta)$ and Rabi frequency $\Omega$ applied to each ion. The system is simulated in [IonSim.jl](https://github.com/HaeffnerLab/IonSim.jl) as a 100 µs square pulse under the Lamb-Dicke and rotating-wave approximations.
+
+The calibration sequence starts in |gg⟩ and applies two MS(π/2) gates, which for perfectly tuned controls transfer all population to |ee⟩. The score is that target population,
 
 ```
-Q(u) = clamp(p_dd,  0, 1)
+Q(x) = clamp(P_ee, 0, 1)
 ```
 
-where p_ss, p_sd, p_ds, p_dd are the four measured two-qubit outcome probabilities (normalized to sum to 1). With N shots the dominant noise source is multinomial: σ² ≈ p_dd(1−p_dd)/N, which varies across parameter space — the motivation for using a heteroscedastic GP.
+where $(P_{gg}, P_{ge}, P_{eg}, P_{ee})$ are the set of state probabilities from a finite number of projective measurements.
 
----
+b) **The noise.** Each evaluation estimates those probabilities from $N$ shots, so that
+
+```
+σ_ε² = P_ee (1 − P_ee) / N
+```
+
+The variance magnitude changes across the input space, depeding on the fidelity value. The heteroscedastic GP accommodates for a input-dependent noise model for better estimation of the fidelity values.
 
 ## Repository structure
 
@@ -20,7 +45,7 @@ where p_ss, p_sd, p_ds, p_dd are the four measured two-qubit outcome probabiliti
 QuantumFidelityOptimization/
 ├── src/
 │   ├── CalibrationCode.jl        # module entry point + exports
-│   ├── calibration.jl            # IonSim physics + estimators (ideal, Q_noisy, Q_varMS p_dd objective)
+│   ├── calibration.jl            # IonSim physics + estimators (ideal, Q_noisy, Q_varMS P_ee objective)
 │   ├── ms_sequences.jl           # MS subgate pulse construction + population calculator
 │   └── bayes_opt.jl              # heteroscedastic GP-UCB (HeteroGP, fit_heterogp, bayesopt_ucb)
 │
@@ -58,8 +83,6 @@ QuantumFidelityOptimization/
 └── installation.md    # detailed installation notes
 ```
 
----
-
 ## Installation
 
 IonSim is an unregistered package that requires a local development checkout. The automated script handles everything:
@@ -70,11 +93,11 @@ bash setup.sh
 
 This installs Julia 1.11.6, clones IonSim v0.5.1, applies a required compatibility patch to `iontraps.jl`, and instantiates all other dependencies from the locked `Manifest.toml`. See [installation.md](installation.md) for details and manual steps.
 
----
+## Running the pipeline
 
-### BO traces 
+### 1. BO traces 
 
-Runs 100 independent BO seeds for each shot count N ∈ {100, 1000, 10000, 100000, ∞}:
+Runs 100 independent BO seeds for each shot count $N \in \{100, 1000, 10000, 100000, \infty \}$:
 
 ```bash
 bash scripts/run_main.sh
@@ -92,9 +115,9 @@ Key parameters (set in `run_main.sh`):
 | `BOUND_SCALE` | 0.5 | Search box half-width (normalized units) |
 | `FREQ_SPAN_KHZ` | 10 | Physical frequency span per axis |
 
-### GP fit quality study
+### 2. GP fit quality study
 
-Evaluates GP posterior accuracy across training sizes n ∈ {10, 50, 100, 250, 500, 1000} and shot counts N ∈ {100, 1000, 10000, 100000, ∞}:
+Evaluates GP posterior accuracy across training sizes $n \in \{10, 50, 100, 250, 500, 1000\}$ and shot counts $N \in \{100, 1000, 10000, 100000, \infty\}$:
 
 ```bash
 julia --project=. scripts/gp_fit_quality_study.jl
@@ -102,7 +125,7 @@ julia --project=. scripts/gp_fit_quality_study.jl
 
 Output: `data/gp_fit_quality_3d_2ms.csv`, `data/slices_output.csv`, `data/train_near_output.csv`.
 
-### Paper figure data (contour + GP slices)
+### 3. Paper figure data (contour + GP slices)
 
 Two more generators feed the figure notebook:
 
@@ -113,9 +136,9 @@ julia --project=. scripts/gp_data_generation.jl         # -> data/gp_slices/, da
 
 `contour_data_generation.jl` computes deterministic (N=∞) 2D score heatmaps over the 2×MS(π/2) sequence (the contour figure). `gp_data_generation.jl` picks, for each N ∈ {100, 1000, 10000, 100000, ∞}, the BO trace whose final Q_det is closest to the median across all 100 seeds (requires `scripts/run_main.sh` to have been run first), then replays its training set at iterations 10/30/50 and fits a GP snapshot at each (the GP-slices figure).
 
-### Generating the figures
+### A. Generating the figures
 
-All figures live in one notebook, `scripts/plots.ipynb` — one cell per figure, each displayed inline and saved as a PDF into `figures/`. See [Python environment](installation.md#python-environment-for-figure-generation) for one-time setup, then:
+All figures live in one notebook, `scripts/plots.ipynb` - one cell per figure, each displayed inline and saved as a PDF into `figures/`. See [Python environment](installation.md#python-environment-for-figure-generation) for one-time setup, then:
 
 ```bash
 source .venv/bin/activate
@@ -124,11 +147,9 @@ jupyter notebook scripts/plots.ipynb
 
 Run all cells (select the "Python 3 (QuantumFidelityOptimization)" kernel if prompted). Each cell reads straight from `data/` — no dependency on the old standalone `python_scripts/*.py` files.
 
----
-
 ## Examples
 
-Quick sanity checks that require no data files:
+Quick sanity checks:
 
 ```bash
 # Toy functions — verify BO algorithms run correctly
@@ -142,8 +163,6 @@ julia --project=. examples/calib_standard2D.jl
 julia --project=. examples/calib_standard3D.jl
 ```
 
----
-
 ## Core API
 
 ```julia
@@ -154,7 +173,7 @@ using .CalibrationCode
 # Physics model
 base = ideal(100.0)                       # ideal parameters at t = 100 μs
 
-# Calibration objective: p_dd of numMS MS(π/2) gates → (y, σy)
+# Calibration objective: P_ee of numMS MS(π/2) gates → (y, σy)
 y, σy = Q_varMS(t, f_cl, f_sb, A; N=1000)
 
 # Alternative Bell-parity estimator (used by the calib_standard examples)
@@ -168,3 +187,13 @@ x_rec, m_rec, s_rec = recommend_mean(gp, bounds)   # GP-mean maximizer
 # Run heteroscedastic GP-UCB
 res = bayesopt_ucb(f; bounds, n_shots=500, n_init=12, n_iter=100, κ=1.96)
 ```
+
+## Contact
+
+For any queries or comments, please do not hesitate to contact the main developers provided below.
+
+|                           |                                                                 |
+|---------------------------|-----------------------------------------------------------------|
+| Patricia García Caspueñas | [patcaspu@uw.edu](patcaspu@uw.edu) |
+| Caleb Walton              | [calebcw@uw.edu](calebcw@uw.edu)                                |
+| Filippo Zacchei           | [filippo.zacchei@polimi.it](filippo.zacchei@polimi.it)          |
