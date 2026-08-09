@@ -1,6 +1,7 @@
 figures/*
 *.bak
 *.png
+!images/*.png
 *.gif
 others/
 docs/

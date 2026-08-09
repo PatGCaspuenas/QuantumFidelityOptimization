@@ -92,19 +92,19 @@ lb3d = fill(-BOUND_SCALE, 3)
 ub3d = fill( BOUND_SCALE, 3)
 _test_mat = QuasiMonteCarlo.sample(N_TEST, lb3d, ub3d, QuasiMonteCarlo.SobolSample())
 
-# Precompute Q_det (= p_dd, the DD population) for every test point.
-# p_dd feeds the exact shot noise variance: σ² = p_dd*(1-p_dd)/N.
-p_dd_arr = Float64[r for r in pmap(1:N_TEST; batch_size=32) do i
+# Precompute Q_det (= P_ee, the |ee⟩ population) for every test point.
+# P_ee feeds the exact shot noise variance: σ² = P_ee*(1-P_ee)/N.
+P_ee_arr = Float64[r for r in pmap(1:N_TEST; batch_size=32) do i
     CalibrationCode.Q_varMS(_t, _u_to_params(_test_mat[:, i])...; N=Inf)[1]
 end]
-Q_true_arr = p_dd_arr
+Q_true_arr = P_ee_arr
 println(@sprintf("  Q_true: mean=%.4f  min=%.4f  max=%.4f",
                  mean(Q_true_arr), minimum(Q_true_arr), maximum(Q_true_arr)))
 flush(stdout)
 
 @everywhere const _test_mat_w = $_test_mat
 @everywhere const _Q_true_w   = $Q_true_arr
-@everywhere const _p_dd_w     = $p_dd_arr
+@everywhere const _P_ee_w     = $P_ee_arr
 @everywhere const _N_TEST_w   = $N_TEST
 
 # ── Slice ground truth (Q_det, independent of seed/N_shots/n_pts) ─────────────
@@ -124,11 +124,11 @@ Q_det_amp = Float64[Q_det([0.0, 0.0, u]) for u in _slice_u_vec]
 # ── Core worker function ───────────────────────────────────────────────────────
 @everywhere begin
     # GP quality metrics against precomputed test grid.
-    # σ_noise² = p_dd*(1-p_dd)/N (exact shot-noise model); 0 when N=Inf.
+    # σ_noise² = P_ee*(1-P_ee)/N (exact shot-noise model); 0 when N=Inf.
     # The combined metric (cov95_adj, nlpd_adj, crps) accounts for both
     # GP uncertainty and measurement noise simultaneously.
     function compute_metrics(μs::Vector{Float64}, σs::Vector{Float64},
-                             Q_ref::Vector{Float64}, p_dd_ref::Vector{Float64},
+                             Q_ref::Vector{Float64}, P_ee_ref::Vector{Float64},
                              N_shots::Real)
         n = length(Q_ref)
 
@@ -137,7 +137,7 @@ Q_det_amp = Float64[Q_det([0.0, 0.0, u]) for u in _slice_u_vec]
         rmse_se = std(e²) / (2.0 * max(rmse, 1e-12) * sqrt(n))
 
         σ_noise² = isinf(N_shots) ? zeros(Float64, n) :
-                   p_dd_ref .* (1.0 .- p_dd_ref) ./ Float64(N_shots)
+                   P_ee_ref .* (1.0 .- P_ee_ref) ./ Float64(N_shots)
         rmse_corr        = sqrt(max(mean(e²) - mean(σ_noise²), 0.0))
         mae              = mean(abs.(μs .- Q_ref))
         mean_sigma_gp    = mean(σs)
@@ -221,7 +221,7 @@ Q_det_amp = Float64[Q_det([0.0, 0.0, u]) for u in _slice_u_vec]
                 σs[i] = sqrt(max(s2, 0.0))
             end
             m = compute_metrics(μs[valid], σs[valid],
-                                _Q_true_w[valid], _p_dd_w[valid], N_shots)
+                                _Q_true_w[valid], _P_ee_w[valid], N_shots)
             metrics = (; m..., n_valid=n_valid,
                          l1=gp.ℓ[1], l2=gp.ℓ[2], l3=gp.ℓ[3],
                          sf=gp.σf, c=gp.c)

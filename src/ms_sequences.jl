@@ -55,9 +55,11 @@ function populations_ms_sequence(pulses)
         _, sol = timeevolution.schroedinger_dynamic(tout, state, h; alg=Vern7())
         state = sol[end]
     end
-    SS = real(expect(ionprojector(chamber, "S", "S"), state))
-    SD = real(expect(ionprojector(chamber, "S", "D"), state))
-    DS = real(expect(ionprojector(chamber, "D", "S"), state))
-    DD = real(expect(ionprojector(chamber, "D", "D"), state))
-    return (gg=SS, eg=SD, ge=DS, ee=DD)
+    # IonSim labels the two 40Ca+ levels "S" and "D"; these are the qubit
+    # states |g⟩ and |e⟩, so the populations are (P_gg, P_ge, P_eg, P_ee).
+    P_gg = real(expect(ionprojector(chamber, "S", "S"), state))
+    P_ge = real(expect(ionprojector(chamber, "S", "D"), state))
+    P_eg = real(expect(ionprojector(chamber, "D", "S"), state))
+    P_ee = real(expect(ionprojector(chamber, "D", "D"), state))
+    return (gg=P_gg, ge=P_ge, eg=P_eg, ee=P_ee)
 end

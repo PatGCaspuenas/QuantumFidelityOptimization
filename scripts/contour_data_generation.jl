@@ -7,9 +7,9 @@
 #   data/varms_2_heatmap_rabi_fcl.csv
 #   data/varms_2_heatmap_sideband_fcl.csv
 #
-# Score = Q_infinity = p_ee (population in |DD>), the same infinite-shot fidelity
+# Score = Q_infinity = P_ee (population in |ee>), the same infinite-shot fidelity
 # used by main_opt.jl / gp_data_generation.jl (Q_varMS with N=Inf). varms_weights
-# normalizes (p_ss, p_sd, p_ds, p_dd) to sum to 1, so this is exactly what
+# normalizes (P_gg, P_ge, P_eg, P_ee) to sum to 1, so this is exactly what
 # Q_varMS(...; N=Inf) reduces to.
 
 using Pkg

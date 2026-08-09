@@ -1,7 +1,7 @@
 # src/calibration.jl
 
 # ── Module-level constants (immutable, safe to share) ────────────────────────
-# Parity lookup: index 1=SS(+1), 2=SD(-1), 3=DS(-1), 4=DD(+1)
+# Parity lookup: index 1=P_gg(+1), 2=P_ge(-1), 3=P_eg(-1), 4=P_ee(+1)
 const PARITY_VALUES = (1, -1, -1, 1)
 const _TARGET_PARITY_ANALYSIS_PHASE = π / 4
 const _SPIN_BASIS = SpinBasis(1 // 2)
@@ -10,11 +10,11 @@ const _TWO_QUBIT_BASIS = tensor(_SPIN_BASIS, _SPIN_BASIS)
 """
     bell_fidelity_phi_plus(ρ) -> Float64
 
-Bell-state fidelity estimator for |ϕ⁺⟩ based on the SS/DD populations and the
-SS↔DD coherence phase-aligned onto the real axis.
+Bell-state fidelity estimator for |ϕ⁺⟩ based on the P_gg/P_ee populations and
+the |gg⟩↔|ee⟩ coherence phase-aligned onto the real axis.
 
-Assumes the computational basis ordering is (SS, SD, DS, DD) so that ρ[1,4]
-corresponds to SS↔DD coherence.
+Assumes the computational basis ordering is (|gg⟩, |ge⟩, |eg⟩, |ee⟩) so that
+ρ[1,4] corresponds to the |gg⟩↔|ee⟩ coherence.
 """
 @inline function bell_fidelity_phi_plus(ρ::AbstractMatrix{<:Complex})::Float64
     ϕ = angle(ρ[1, 4])
@@ -116,8 +116,8 @@ end
 """
     evolve_reduced_density(setup, t; lamb_dicke_order=1) -> Matrix{Complex}
 
-Time-evolve |SS⟩ ⊗ |0⟩ under IonSim Hamiltonian and return the reduced 2-qubit density matrix
-as a plain complex matrix in the (SS, SD, DS, DD) basis.
+Time-evolve |gg⟩ ⊗ |0⟩ under IonSim Hamiltonian and return the reduced 2-qubit density matrix
+as a plain complex matrix in the (|gg⟩, |ge⟩, |eg⟩, |ee⟩) basis.
 """
 function evolve_reduced_density(setup, t::Float64; lamb_dicke_order::Int=1)
     ca, chamber, mode = setup.ca, setup.chamber, setup.mode
@@ -212,13 +212,14 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     tout = Float64[0.0, t]
     _, sol = timeevolution.schroedinger_dynamic(tout, ca["S"] ⊗ ca["S"] ⊗ mode[0], h)
 
-    # Outcome probabilities in computational basis from projectors
-    SS = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
-    SD = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
-    DS = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
-    DD = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
+    # Outcome probabilities in computational basis from projectors. IonSim labels
+    # the two 40Ca+ levels "S" and "D"; these are the qubit states |g⟩ and |e⟩.
+    P_gg = real(expect(ionprojector(chamber, "S", "S"), sol[end]))
+    P_ge = real(expect(ionprojector(chamber, "S", "D"), sol[end]))
+    P_eg = real(expect(ionprojector(chamber, "D", "S"), sol[end]))
+    P_ee = real(expect(ionprojector(chamber, "D", "D"), sol[end]))
 
-    weights = _normalized_population_weights((SS, SD, DS, DD))
+    weights = _normalized_population_weights((P_gg, P_ge, P_eg, P_ee))
     if isinf(Float64(n_eval))
         P_odd = weights[2] + weights[3]
     else
@@ -229,20 +230,20 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     ρ_red = ptrace(sol[end] ⊗ dagger(sol[end]), [3])
     ρ = Operator(_TWO_QUBIT_BASIS, ρ_red.data)
 
-    SSs = tensor(spinup(_SPIN_BASIS), spinup(_SPIN_BASIS))
-    SDs = tensor(spinup(_SPIN_BASIS), spindown(_SPIN_BASIS))
-    DSs = tensor(spindown(_SPIN_BASIS), spinup(_SPIN_BASIS))
-    DDs = tensor(spindown(_SPIN_BASIS), spindown(_SPIN_BASIS))
+    ket_gg = tensor(spinup(_SPIN_BASIS), spinup(_SPIN_BASIS))
+    ket_ge = tensor(spinup(_SPIN_BASIS), spindown(_SPIN_BASIS))
+    ket_eg = tensor(spindown(_SPIN_BASIS), spinup(_SPIN_BASIS))
+    ket_ee = tensor(spindown(_SPIN_BASIS), spindown(_SPIN_BASIS))
 
     meas = zeros(Float64, length(phase_grid))
     p = Vector{Float64}(undef, 4)
     for (i, φ) in enumerate(phase_grid)
         Rφ = global_rotation(π / 2, φ)
         ρφ = Rφ * ρ * dagger(Rφ)
-        p[1] = proj(SSs, ρφ)
-        p[2] = proj(SDs, ρφ)
-        p[3] = proj(DSs, ρφ)
-        p[4] = proj(DDs, ρφ)
+        p[1] = proj(ket_gg, ρφ)
+        p[2] = proj(ket_ge, ρφ)
+        p[3] = proj(ket_eg, ρφ)
+        p[4] = proj(ket_ee, ρφ)
         p .= _normalized_population_weights((p[1], p[2], p[3], p[4]))
 
         if isinf(Float64(n_eval))
@@ -263,23 +264,23 @@ function Q_noisy(t::Float64, f_cl::Float64, f_sb::Float64, A::Float64;
     return clamp((1 - P_odd + C) / 2, 0.0, 1.0)
 end
 
-# Normalized (p_ss, p_sd, p_ds, p_dd) populations after `numMS` closed-loop MS(π/2) gates.
+# Normalized (P_gg, P_ge, P_eg, P_ee) populations after `numMS` closed-loop MS(π/2) gates.
 function varms_weights(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
                        numMS::Int=2, relative_phase::Float64=0.0, phase_drift::Float64=0.0)
     subgates = [ms_subgate(π / 2, 0.0) for _ in 1:numMS]
     pulses = build_closed_loop_ms_sequence(t, f_cl, Δ, I, subgates;
                                            relative_phase=relative_phase, phase_drift=phase_drift)
     pops = populations_ms_sequence(pulses)
-    return _normalized_population_weights((pops.gg, pops.eg, pops.ge, pops.ee))
+    return _normalized_population_weights((pops.gg, pops.ge, pops.eg, pops.ee))
 end
 
 """
     Q_varMS(t, f_cl, Δ, I; N=1000, numMS=2, relative_phase=0.0, phase_drift=0.0) -> (y, σy)
 
 Fidelity observation for a closed-loop sequence of `numMS` MS(π/2) gates,
-targeting all population in |DD⟩. Returns the score `y = p_dd` (population
-observed in |DD⟩) and the binomial projection-noise std `σy`. With finite `N`
-`p_dd` is estimated from multinomially sampled shots; `N=Inf` returns the
+targeting all population in |ee⟩. Returns the score `y = P_ee` (population
+observed in |ee⟩) and the binomial projection-noise std `σy`. With finite `N`
+`P_ee` is estimated from multinomially sampled shots; `N=Inf` returns the
 exact Born-rule population with `σy=0`.
 """
 function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
@@ -291,8 +292,8 @@ function Q_varMS(t::Float64, f_cl::Float64, Δ::Float64, I::Float64;
     w = varms_weights(t, f_cl, Δ, I; numMS=numMS,
                       relative_phase=relative_phase, phase_drift=phase_drift)
     isinf(Float64(n_eval)) && return clamp(w[4], 0.0, 1.0), 0.0
-    p_dd = w[4]
-    σy = sqrt(max(p_dd * (1.0 - p_dd), 0.0) / Float64(n_eval))
+    P_ee = w[4]
+    σy = sqrt(max(P_ee * (1.0 - P_ee), 0.0) / Float64(n_eval))
     counts = rand(rng, Distributions.Multinomial(Int(n_eval), collect(Float64, w)))
     return clamp(counts[4] / Float64(n_eval), 0.0, 1.0), σy
 end
